@@ -1,0 +1,2 @@
+[17:47:45] [INFO] [test] 🧪 Inicio: unit/test_cuentas_unit.py::test_responder_abrir_cuenta
+[17:47:45] [ERROR] [test] ❌ Falló: unit/test_cuentas_unit.py::test_responder_abrir_cuenta

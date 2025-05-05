@@ -1,0 +1,1 @@
+{"name": "test_responder_saldo", "status": "skipped", "description": "Si la pregunta contiene 'saldo', devuelve el saldo correcto.", "start": 1746373252856, "stop": 1746373252856, "uuid": "010d3e15-cc81-49b0-a872-1c76a5ca3dd9", "testCaseId": "d9ae2908498c32c215102b675fa842f9", "fullName": "unit.test_consultas_unit#test_responder_saldo"}

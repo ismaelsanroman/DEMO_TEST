@@ -1,0 +1,10 @@
+[2025-05-04 17:47:45] [INFO] [test] 🧪 Inicio: unit/test_consultas_unit.py::test_responder_saldo
+[2025-05-04 17:47:45] [SUCCESS] [test] ✅ OK: unit/test_consultas_unit.py::test_responder_saldo
+[2025-05-04 17:47:45] [INFO] [test] 🧪 Inicio: unit/test_cuentas_unit.py::test_responder_abrir_cuenta
+[2025-05-04 17:47:45] [ERROR] [test] ❌ Falló: unit/test_cuentas_unit.py::test_responder_abrir_cuenta
+[2025-05-04 17:47:45] [INFO] [test] 🧪 Inicio: unit/test_ia_unit.py::test_responder_hipoteca
+[2025-05-04 17:47:45] [SUCCESS] [test] ✅ OK: unit/test_ia_unit.py::test_responder_hipoteca
+[2025-05-04 17:47:45] [INFO] [test] 🧪 Inicio: unit/test_identidad_unit.py::test_responder_verificar_dni
+[2025-05-04 17:47:45] [SUCCESS] [test] ✅ OK: unit/test_identidad_unit.py::test_responder_verificar_dni
+[2025-05-04 17:47:45] [INFO] [test] 🧪 Inicio: unit/test_orquestador_unit.py::test_obtener_token
+[2025-05-04 17:47:45] [SUCCESS] [test] ✅ OK: unit/test_orquestador_unit.py::test_obtener_token

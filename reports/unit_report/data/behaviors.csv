@@ -1,0 +1,7 @@
+"BROKEN","EPIC","FAILED","FEATURE","PASSED","SKIPPED","STORY","UNKNOWN"
+"0","","0","","0","3","","0"
+"0","","0","Microservicio IA","1","0","Respuesta de hipoteca","0"
+"0","","1","Microservicio Cuentas","0","0","Apertura de cuenta","0"
+"0","","0","Microservicio Identidad","1","0","Verificación de DNI","0"
+"0","","0","Microservicio Consultas","1","0","Respuesta de saldo","0"
+"0","","0","Microservicio Orquestador","1","0","Obtener token","0"

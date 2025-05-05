@@ -1,0 +1,2 @@
+[17:48:17] [INFO] [test] 🧪 Inicio: unit/test_orquestador_unit.py::test_obtener_token
+[17:48:17] [SUCCESS] [test] ✅ OK: unit/test_orquestador_unit.py::test_obtener_token

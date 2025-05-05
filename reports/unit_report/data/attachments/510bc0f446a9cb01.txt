@@ -1,0 +1,2 @@
+[17:47:45] [INFO] [test] 🧪 Inicio: unit/test_consultas_unit.py::test_responder_saldo
+[17:47:45] [SUCCESS] [test] ✅ OK: unit/test_consultas_unit.py::test_responder_saldo

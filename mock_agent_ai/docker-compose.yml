@@ -1,0 +1,34 @@
+version: '3.9'
+
+services:
+  orquestador:
+    build: orquestador
+    ports:
+      - "8000:8000"
+    environment:
+      - MICROS_ENDPOINTS=http://micro_consultas:8000,http://micro_cuentas:8000,http://micro_identidad:8000,http://micro_ia:8000
+    depends_on:
+      - micro_consultas
+      - micro_cuentas
+      - micro_identidad
+      - micro_ia
+
+  micro_consultas:
+    build: micro_consultas
+    ports:
+      - "8001:8000"
+
+  micro_cuentas:
+    build: micro_cuentas
+    ports:
+      - "8002:8000"
+
+  micro_identidad:
+    build: micro_identidad
+    ports:
+      - "8003:8000"
+
+  micro_ia:
+    build: micro_ia
+    ports:
+      - "8004:8000"

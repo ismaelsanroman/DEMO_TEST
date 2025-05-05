@@ -1,0 +1,2 @@
+[17:48:17] [INFO] [test] 🧪 Inicio: unit/test_identidad_unit.py::test_responder_verificar_dni
+[17:48:17] [SUCCESS] [test] ✅ OK: unit/test_identidad_unit.py::test_responder_verificar_dni
