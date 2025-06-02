@@ -2,44 +2,44 @@ import subprocess
 import shutil
 from pathlib import Path
 
-# ----------------------------------------------------------------------------------------------------------------------
+# ------------------------------------------------------------
 # 🔧 CONFIGURACIÓN
-# ----------------------------------------------------------------------------------------------------------------------
-SRC_ROOT  = Path("src")                              # Carpeta raíz donde están todos los paquetes (src/mi_paquete/)
-TESTS_DIR = Path("testspilot_unittests")             # Carpeta de destino para los tests generados
-# ----------------------------------------------------------------------------------------------------------------------
-
+# ------------------------------------------------------------
+SRC_ROOT  = Path("src")                              # Raíz donde están todos los paquetes Python
+TESTS_DIR = Path("testspilot_unittests")             # Carpeta destino para alojar TODOS los test_*.py
+# ------------------------------------------------------------
 
 def encontrar_paquete_src() -> Path:
     """
-    Busca en /src la carpeta que tenga al menos un '__init__.py' en cualquier subdirectorio.
-    Devuelve la primera que cumpla esa condición, o lanza RuntimeError si no hay ninguna.
+    Busca en /src la carpeta que contenga al menos un '__init__.py'
+    en algún subdirectorio. Retorna la primera que cumpla.
+    Si no hay ninguna, lanza RuntimeError.
     """
     for carpeta in SRC_ROOT.iterdir():
         if not carpeta.is_dir():
             continue
-        # Si en esta carpeta (o en cualquiera de sus subcarpetas) existe un __init__.py, la tomamos como paquete
+
+        # Si en esta carpeta (o en cualquiera de sus subcarpetas) hay un __init__.py,
+        # la tomamos como 'mi_paquete'.
         if any((carpeta / "__init__.py").exists() for _ in carpeta.rglob("__init__.py")):
             return carpeta
 
     raise RuntimeError(
         "❌ No se encontró ningún paquete Python dentro de 'src/'.\n"
-        "   Asegúrate de tener algo como 'src/mi_paquete/__init__.py'."
+        "   Debes tener algo como 'src/mi_paquete/__init__.py'."
     )
 
 
 def generar_tests():
     """
-    1) Detecta el paquete Python en /src
-    2) Para cada .py dentro de ese paquete (excepto __init__.py y test_*.py), invoca:
-         pipenv run python -m testpilot <archivo>
-       que genera junto al archivo un test llamado test_<archivo>.py
-    3) Entonces busca todos los test_*.py recién creados y los mueve a TESTS_DIR,
-       dejando así limpio el árbol de src/ y concentrando todos los tests en testspilot_unittests/.
+    1) Detecta el paquete bajo src/
+    2) Invoca   pipenv run python -m testpilot   SIN argumentos   para que TestPilot
+       genere un 'test_<módulo>.py' junto a cada .py de ese paquete.
+    3) Recorre todos los archivos test_*.py recién creados y los mueve a TESTS_DIR.
     """
-    print("🧪 Iniciando generación de tests con TestPilot (módulo Python)...")
+    print("🧪 Iniciando generación de tests con TestPilot…")
 
-    # 1) Buscar el paquete dentro de src/
+    # 1) Detectar el paquete principal dentro de src/
     try:
         paquete = encontrar_paquete_src()
     except RuntimeError as e:
@@ -51,52 +51,40 @@ def generar_tests():
     # 2) Crear carpeta destino (si no existe)
     TESTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 3) Listar todos los .py válidos (omitimos __init__.py y test_*.py)
-    archivos_fuente = [
-        archivo for archivo in paquete.rglob("*.py")
-        if not archivo.name.startswith("test_")
-        and archivo.name != "__init__.py"
-    ]
+    # 3) Ejecutar TestPilot sin argumentos posicionales
+    #    (TestPilot busca automáticamente los .py dentro del paquete y genera los test_*.py)
+    cmd = ["pipenv", "run", "python", "-m", "testpilot"]
+    print(f"🚀 Ejecutando: {' '.join(cmd)}")
+    resultado = subprocess.run(cmd, capture_output=True, text=True)
 
-    if not archivos_fuente:
-        print("⚠️ No se encontraron archivos .py para generar tests.")
+    if resultado.returncode != 0:
+        print("❌ Falló TestPilot al generar tests para TODO el paquete:")
+        print(resultado.stderr.strip())
+        return
+    else:
+        print("✅ TestPilot completó la generación de tests para todos los módulos.")
+
+    # 4) Ahora, TestPilot habrá creado en cada subcarpeta de `paquete` un archivo test_<módulo>.py.
+    #    Buscamos recursivamente todos estos test_*.py y los movemos a TESTS_DIR.
+    tests_generados = list(paquete.rglob("test_*.py"))
+    if not tests_generados:
+        print("⚠️ No se encontró ningún 'test_*.py' generado dentro de la carpeta del paquete.")
         return
 
-    # 4) Para cada archivo, invocar TestPilot como módulo de Python:
-    for archivo in archivos_fuente:
-        rel_path = archivo.relative_to(paquete)
-        print(f"\n🔍 Procesando: {rel_path}")
-
-        # Comando: pipenv run python -m testpilot <ruta_del_archivo>
-        cmd = ["pipenv", "run", "python", "-m", "testpilot", str(archivo)]
-        resultado = subprocess.run(cmd, capture_output=True, text=True)
-
-        if resultado.returncode != 0:
-            print(f"❌ Error al generar test para {archivo.name}:")
-            print(resultado.stderr.strip())
-            continue
-        else:
-            print(f"✅ TestPilot ejecutado OK para {archivo.name}")
-
-        # 5) El test generado se llama test_<archivo.stem>.py y está junto al archivo fuente
-        nombre_test = f"test_{archivo.stem}.py"
-        ruta_test_original = archivo.parent / nombre_test
-
-        if not ruta_test_original.exists():
-            print(f"⚠️ No se encontró el test generado esperado: {ruta_test_original}")
-            continue
-
-        # 6) Mover test_<archivo> a TESTS_DIR
+    for ruta_test in tests_generados:
+        nombre_test = ruta_test.name
         destino = TESTS_DIR / nombre_test
 
+        # Si ya hay un test con el mismo nombre en TESTS_DIR, lo borramos para sobreescribir
+        if destino.exists():
+            destino.unlink()
+
         try:
-            if destino.exists():
-                destino.unlink()   # Si ya había uno con el mismo nombre, lo borramos (sobreescribimos)
-            shutil.move(str(ruta_test_original), str(destino))
-            print(f"   📂 Movido: {ruta_test_original.relative_to(Path.cwd())}  →  {destino.relative_to(Path.cwd())}")
+            shutil.move(str(ruta_test), str(destino))
+            print(f"   ✅ Movido: {ruta_test.relative_to(Path.cwd())} → {destino.relative_to(Path.cwd())}")
         except Exception as e:
-            print(f"❌ Error moviendo {nombre_test} a {TESTS_DIR}: {e}")
-            # Si falla moverlo, dejamos el test en su ubicación original y pasamos al siguiente
+            print(f"   ❌ No se pudo mover '{nombre_test}' a '{TESTS_DIR}': {e}")
+            # En caso de error, dejamos el test en la ubicación original
 
     print("\n🎉 Generación y reubicación de tests finalizada.")
 
