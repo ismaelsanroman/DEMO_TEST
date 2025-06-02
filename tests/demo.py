@@ -37,14 +37,20 @@ def comprobar_api_openai():
     Intenta listar modelos con la clave actual para verificar:
       - Que la clave existe y es válida.
       - Que hay conexión a la API de OpenAI.
-    Si falla cualquier cosa, lanza RuntimeError con el mensaje de error correspondiente.
+    Si falla cualquier cosa, lanza RuntimeError con el mensaje de error.
     """
     try:
-        # openai.Model.list() en openai>=1.0.0 devuelve la lista de modelos disponibles
-        openai.Model.list()
+        # Nueva llamada en openai>=1.0.0 para listar modelos disponibles
+        openai.models.list()
+    except openai.error.AuthenticationError as e:
+        raise RuntimeError(f"❌ Clave OpenAI inválida o caducada: {e}")
+    except (openai.error.APIConnectionError, requests.exceptions.RequestException) as e:
+        raise RuntimeError(f"❌ No se pudo conectar a OpenAI: {e}")
+    except openai.error.OpenAIError as e:
+        raise RuntimeError(f"❌ Error al verificar OpenAI API: {e}")
     except Exception as e:
-        # Si ocurre cualquier excepción (autenticación, red, etc.), la reportamos
-        raise RuntimeError(f"❌ Error al conectar con OpenAI: {e}")
+        # Cualquier otro fallo no previsto
+        raise RuntimeError(f"❌ Error inesperado al comprobar OpenAI API: {e}")
 
 
 def extraer_definiciones_py(ruta_archivo: Path) -> dict:
@@ -118,13 +124,13 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
 def llamada_openai_chat(prompt: str) -> str:
     """
     Llama a la API de OpenAI (v1.x) usando openai.chat.completions.create(...) y
-    retorna el texto del primer mensaje de respuesta (que contendrá el bloque de tests).
+    retorna el texto del primer mensaje de respuesta (que contendrá los tests).
     """
     respuesta = openai.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Eres un experto en generar tests en pytest para código Python."},
-            {"role": "user",   "content": prompt}
+            {"role": "user", "content": prompt}
         ],
         temperature=0.2,
         max_tokens=2000,
@@ -135,12 +141,12 @@ def llamada_openai_chat(prompt: str) -> str:
 
 def generar_tests_para_modulo(ruta_archivo: Path):
     """
-    1) Extrae definiciones de funciones y clases del archivo.
-    2) Si no hay definiciones (ni funciones ni clases), salta y avisa.
+    1) Extrae definiciones de funciones y clases de 'ruta_archivo'.
+    2) Si no hay definiciones, imprime aviso y retorna.
     3) Genera el prompt y llama a la API de OpenAI.
     4) Crea (o sobrescribe) el fichero test_<módulo>.py en DEST_TESTS.
     """
-    nombre_modulo = ruta_archivo.stem  # ej: "mcp_adapter_base"
+    nombre_modulo = ruta_archivo.stem  # ej. "mcp_adapter_base"
     defs = extraer_definiciones_py(ruta_archivo)
 
     if not defs["funciones"] and not defs["clases"]:
@@ -177,7 +183,7 @@ def generar_tests():
     Flujo principal:
     1) Carga y comprueba que OPENAI_API_KEY existe.
     2) Verifica la conexión a la API de OpenAI (listado de modelos).
-    3) Recoge todos los .py en 'src/' (omitendo __init__.py y test_*.py).
+    3) Recorre todos los .py en 'src/' (omitendo __init__.py y test_*.py).
     4) Para cada módulo, genera su test en pytest y lo vuelca en DEST_TESTS.
     """
     # ------------------------------------------------
