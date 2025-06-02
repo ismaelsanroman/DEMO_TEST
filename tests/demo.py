@@ -89,36 +89,123 @@ def extraer_definiciones_py(ruta_archivo: Path) -> dict:
 
 def generar_prompt(nombre_modulo: str, defs: dict) -> str:
     """
-    Construye un prompt en español para pedir a GPT-4 que genere tests en pytest
-    para las funciones y clases de un módulo dado.
+    Construye un prompt en español para pedir a GPT-4 que genere tests en pytest 
+    para las funciones y clases de un módulo dado, cumpliendo con:
+      - pytest markers: @pytest.mark.unit, @pytest.mark.<funcionalidad>, @pytest.mark.<tipo>
+      - Allure decorators: @allure.feature, @allure.story
+      - Logger usage: import logging; logger = logging.getLogger(__name__)
+      - Código formateado para Black, Flake8 e Isort
+      - Mantener complejidad ciclomática baja (idealmente 1-2 por test)
+      - Mutant testing friendly (tests sencillos con aserciones directas)
 
     - nombre_modulo: ruta relativa (ej. "input/mcp_adapter_base.py")
-    - defs:          {"funciones": [...], "clases": [...]}
+    - defs: {"funciones": [("nombre", "código fuente")], "clases": [("NombreClase", "código")] }
     """
     prompt = (
-        f"Genera tests en pytest para el módulo Python '{nombre_modulo}'.\n"
-        "A continuación tienes las definiciones (funciones y/o clases) a testear.\n\n"
+        f"### CONTEXTO:\n"
+        f"- Módulo Python a testear: '{nombre_modulo}'.\n"
+        f"- Queremos generar tests unitarios en pytest que cumplan los siguientes requisitos:\n"
+        f"  1. Cada test debe tener:\n"
+        f"     • @pytest.mark.unit\n"
+        f"     • @pytest.mark.<funcionalidad> indicando la funcionalidad principal (p.ej. agents, network, etc.)\n"
+        f"     • @pytest.mark.<tipo> indicando si es 'happy_path', 'exception', 'edge_case', etc.\n"
+        f"  2. Cada suite o función de test debe llevar decoradores de Allure para feature y story, por ejemplo:\n"
+        f"     @allure.feature(\"<Nombre de la funcionalidad>\")\n"
+        f"     @allure.story(\"<Historia Concreta o Caso de Uso>\")\n"
+        f"  3. Incluir al inicio de cada archivo de test:\n"
+        f"     import logging\n"
+        f"     logger = logging.getLogger(__name__)\n"
+        f"     y dentro de cada test, usar logger.info(\"<mensaje descriptivo>\") para trazabilidad.\n"
+        f"  4. El código generado debe pasar **Black**, **Flake8** e **Isort** sin errores:\n"
+        f"     • Líneas <= 88 caracteres\n"
+        f"     • Importar en tres secciones: Stdlib, bibliotecas de terceros, imports locales.\n"
+        f"     • No violar reglas de style (espacios, indentación, etc.).\n"
+        f"  5. Mantener cada test con complejidad ciclomática lo más baja posible (1 o 2).\n"
+        f"  6. Asegurarse de que los tests sean 'mutation-testing friendly': aserciones simples,\n"
+        f"     evitar lógica condicional compleja dentro del test.\n\n"
+        f"### DEFINICIONES A TESTEAR:\n"
     )
 
+    # Insertar bloques de código para cada función encontrada
     if defs["funciones"]:
         prompt += "## FUNCIONES:\n"
         for fname, fcode in defs["funciones"]:
-            prompt += f"\n### Función: {fname}\n```python\n{fcode}\n```\n"
+            prompt += (
+                f"\n### Función: {fname}\n"
+                f"```python\n"
+                f"{fcode}\n"
+                f"```\n"
+            )
 
+    # Insertar bloques de código para cada clase encontrada
     if defs["clases"]:
         prompt += "\n## CLASES:\n"
         for cname, ccode in defs["clases"]:
-            prompt += f"\n### Clase: {cname}\n```python\n{ccode}\n```\n"
+            prompt += (
+                f"\n### Clase: {cname}\n"
+                f"```python\n"
+                f"{ccode}\n"
+                f"```\n"
+            )
 
     prompt += (
-        "\nInstrucciones:\n"
-        "1) Escribe tests en pytest que cubran casos normales y edge-cases.\n"
-        "2) Importa el módulo con su ruta completa, por ejemplo:\n"
-        "   from src.gen_ai_agent_sdk_lib.subcarpeta import módulo\n"
-        "3) Usa nombres descriptivos en las funciones de test (en español o inglés).\n"
-        "4) Incluye comentarios breves explicando qué prueba cada test.\n\n"
-        "Devuélvelo TODO en un único bloque de código Python válido.\n"
+        "\n### INSTRUCCIONES ADICIONALES:\n"
+        "1. Para cada función o clase, genera uno o varios tests en pytest que cubran casos:\n"
+        "   - Caso nominal (happy path) si aplica.\n"
+        "   - Edge cases relevantes (inputs vacíos, valores límite, excepciones esperadas).\n"
+        "2. Cada archivo de test debe tener al inicio:\n"
+        "   ```python\n"
+        "   import pytest\n"
+        "   import logging\n"
+        "   import allure\n"
+        "   from src.gen_ai_agent_sdk_lib import <subpaquete>  # según la ubicación\n\n"
+        "   logger = logging.getLogger(__name__)\n"
+        "   ```\n"
+        "3. Cada test debe empezar con algo como:\n"
+        "   ```python\n"
+        "   @pytest.mark.unit\n"
+        "   @pytest.mark.<funcionalidad>  # Ej: @pytest.mark.agents o @pytest.mark.network\n"
+        "   @pytest.mark.<tipo>           # Ej: @pytest.mark.happy_path, @pytest.mark.exception, etc.\n"
+        "   @allure.feature(\"<Funcionalidad Principal>\")\n"
+        "   @allure.story(\"<Caso de Uso o Historia>\")\n"
+        "   def test_<nombre_test>(<fixtures_si_es_necesario>):\n"
+        "       logger.info(\"<Mensaje descriptivo de inicio de test>\")\n"
+        "       # aquí va la llamada a la función/clase y las aserciones\n"
+        "   ```\n"
+        "4. Cada test debe tener aserciones claras:\n"
+        "   - `assert` simples comparando valores concretos.\n"
+        "   - No introducir lógica condicional compleja dentro del test.\n"
+        "5. Organizar las importaciones en este orden:\n"
+        "   - Módulos estándar de Python\n"
+        "   - Bibliotecas de terceros (pytest, allure, requests, etc.)\n"
+        "   - Imports locales (`from src.gen_ai_agent_sdk_lib.<subpaquete> import <módulo>`)\n"
+        "   Asegúrate de que pasa `isort --profile black`.\n"
+        "6. Formatea el archivo final con `black` (líneas <= 88 caracteres, comillas dobles, etc.)\n"
+        "   y revisa que con `flake8` no haya errores.\n"
+        "7. Mantén una complejidad ciclomática por test de 1 o 2 (no más de un condicional simple).\n"
+        "8. Evita bloques `try/except` dentro de los tests; si esperas excepciones, utiliza:\n"
+        "   ```python\n"
+        "   with pytest.raises(<ExcepciónEsperada>):\n"
+        "       <llamada que dispara la excepción>\n"
+        "   ```\n"
+        "9. Asegúrate de que la estructura de carpetas de tests / archivos de test coincide con:\n"
+        "   `testspilot_unittests/test_<nombre_modulo>.py`\n"
+        "10. Al final del prompt, devuelve **solo un** bloque de código en Python completo,\n"
+        "    sin explicaciones adicionales.\n\n"
+        "### EJEMPLO DE MÓDULO A TESTEAR / CASO CONCRETO:\n"
+        "- Supongamos que el módulo define una función `send_instruction` que hace una petición HTTP\n"
+        "  y decodifica JSON. Queremos tests que cubran respuesta válida y respuesta con JSON inválido.\n\n"
+        "#### Ejemplo de funciones a testear:\n"
+        "```python\n"
+        "def send_instruction(instruction: str) -> dict:\n"
+        "    \"\"\"Envía la instrucción al supervisor y devuelve el JSON parseado\"\"\"\n"
+        "    response = requests.post(URL_SUPERVISOR, json={'input': instruction})\n"
+        "    data = response.json()\n"
+        "    return data\n"
+        "```\n\n"
+        "#### Ahora genera los tests completos (pytest, allure, logger, marcadores, formato Black/Isort/Flake8, etc.)\n"
     )
+
     return prompt
 
 
