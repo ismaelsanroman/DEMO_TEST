@@ -1,6 +1,5 @@
-# -------------------------------------------------------
 # scripts/generate_tests.py
-# -------------------------------------------------------
+
 import os
 import ast
 import openai
@@ -10,55 +9,49 @@ from dotenv import load_dotenv
 # -------------------------------------------------------
 # 🔧 CONFIGURACIÓN
 # -------------------------------------------------------
-SRC_ROOT     = Path("src")                           # Carpeta donde están tus paquetes Python (src/mi_paquete/)
-DEST_TESTS   = Path("testspilot_unittests")          # Carpeta destino donde volcará test_<módulo>.py
-OPENAI_MODEL = "gpt-4"                               # Modelo a usar (puede ser "gpt-3.5-turbo" si no tienes acceso a GPT-4)
+SRC_ROOT     = Path("src")                           # Carpeta raíz donde están todos los .py
+DEST_TESTS   = Path("testspilot_unittests")          # Carpeta destino para los test_<módulo>.py
+OPENAI_MODEL = "gpt-4"                               # O "gpt-3.5-turbo" si no tienes acceso a GPT-4
 # -------------------------------------------------------
 
 
 def cargar_api_key():
     """
-    Carga la variable OPENAI_API_KEY desde .env (si existe) o desde el entorno.
-    Si no la encuentra, lanza RuntimeError con mensaje claro.
+    Carga la variable OPENAI_API_KEY desde .env o desde el entorno.
+    Si no la encuentra, levanta RuntimeError.
     """
-    load_dotenv()  # lee automáticamente .env si existe en la raíz
+    load_dotenv()  # lee automáticamente .env si existe
     clave = os.getenv("OPENAI_API_KEY")
     if not clave:
         raise RuntimeError(
             "🚨 No se encontró la variable OPENAI_API_KEY.\n"
-            "   Define OPENAI_API_KEY en un archivo .env o expórtala en tu shell."
+            "   Defínela en un archivo .env o expórtala en tu shell."
         )
     openai.api_key = clave
 
 
-def encontrar_paquete_src() -> Path:
+def comprobar_api():
     """
-    Busca dentro de SRC_ROOT (src/) la primera carpeta que contenga
-    al menos un __init__.py en cualquier subnivel. Eso será tu paquete Python.
-    Por ejemplo: src/gen_ai_agent_sdk_lib
-    Si no encuentra ninguno, lanza RuntimeError.
+    Hace una llamada mínima a la API de OpenAI (listado de modelos) para
+    verificar que la clave es válida y no hay problemas de conexión.
     """
-    for carpeta in SRC_ROOT.iterdir():
-        if not carpeta.is_dir():
-            continue
-        # Recorre recursivamente para saber si existe un __init__.py
-        if any((carpeta / "__init__.py").exists() for _ in carpeta.rglob("__init__.py")):
-            return carpeta
-
-    raise RuntimeError(
-        "🚨 No se encontró ningún paquete Python en 'src/'.\n"
-        "   Asegúrate de tener algo como 'src/mi_paquete/__init__.py'."
-    )
+    try:
+        # openai.Model.list() regresa un JSON con la lista de modelos disponibles
+        openai.Model.list()
+    except Exception as e:
+        raise RuntimeError(
+            f"❌ Error al conectar con OpenAI o clave inválida: {e}"
+        )
 
 
 def extraer_definiciones_py(ruta_archivo: Path) -> dict:
     """
-    Dado un archivo Python (ruta_archivo), parsea el AST y devuelve un dict con:
+    Dado un archivo .py, parsea el AST y devuelve un dict:
       {
-        "funciones": [("nombre_función", "código fuente completo de la función"), ...],
-        "clases":    [("NombreClase", "código fuente completo de la clase"), ...]
+        "funciones": [("nombre_función", "código de la función"), ...],
+        "clases":    [("NombreClase", "código de la clase"), ...]
       }
-    Sólo considera definiciones a nivel superior (no anidadas).
+    Solo definiciones a nivel superior.
     """
     with ruta_archivo.open("r", encoding="utf-8") as f:
         fuente = f.read()
@@ -68,7 +61,6 @@ def extraer_definiciones_py(ruta_archivo: Path) -> dict:
 
     for nodo in tree.body:
         if isinstance(nodo, ast.FunctionDef):
-            # Tomamos desde la línea de inicio hasta la última línea de su cuerpo
             li = nodo.lineno - 1
             lf = max(n.lineno for n in nodo.body)
             lineas = fuente.splitlines()[li:lf]
@@ -87,10 +79,10 @@ def extraer_definiciones_py(ruta_archivo: Path) -> dict:
 
 def generar_prompt(nombre_modulo: str, defs: dict) -> str:
     """
-    Construye un prompt en español para pedirle a GPT-4 que genere tests en pytest
-    para todas las funciones y clases de ese módulo.
-    nombre_modulo = ruta relativa del módulo (por ejemplo: "input/mcp_adapter_base.py")
-    defs = {"funciones":[(...)], "clases":[(...)]}
+    Construye un prompt en español para pedir tests en pytest para
+    funciones y clases de un módulo.
+    nombre_modulo: ruta relativa (ej. "input/mcp_adapter_base.py")
+    defs: {"funciones": [...], "clases": [...]}
     """
     prompt = (
         f"Genera tests en pytest para el módulo Python '{nombre_modulo}'.\n"
@@ -109,10 +101,10 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
 
     prompt += (
         "\nInstrucciones:\n"
-        "1) Escribe tests en pytest que cubran casos normales y algunos edge-cases.\n"
-        "2) Utiliza la importación completa, por ejemplo:\n"
+        "1) Escribe tests en pytest que cubran casos normales y edge-cases.\n"
+        "2) Importa el módulo con su ruta completa, por ejemplo:\n"
         "   from src.gen_ai_agent_sdk_lib.subcarpeta import módulo\n"
-        "3) Pon nombres descriptivos a cada función de test (en español o inglés).\n"
+        "3) Usa nombres descriptivos en las funciones de test (español o inglés).\n"
         "4) Añade comentarios breves explicando qué prueba cada test.\n\n"
         "Devuélvelo TODO en un único bloque de código Python válido.\n"
     )
@@ -121,38 +113,38 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
 
 def llamada_openai_chat(prompt: str) -> str:
     """
-    Utiliza la nueva interfaz de openai >= 1.0.0 para crear completions tipo Chat.
-    Retorna únicamente el texto que viene en la respuesta (un bloque de código con los tests).
+    Llama a la API de OpenAI (openai>=1.0.0) usando el endpoint de chat completions.
+    Retorna el contenido del primer message de la respuesta.
     """
     respuesta = openai.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
-            {"role": "system", "content": "Eres un experto en crear tests en pytest para código Python."},
-            {"role": "user", "content": prompt}
+            {"role": "system",  "content": "Eres un experto en generar tests en pytest para código Python."},
+            {"role": "user",    "content": prompt}
         ],
         temperature=0.2,
         max_tokens=2000,
         n=1,
     )
-    # La respuesta final como string
     return respuesta.choices[0].message.content.strip()
 
 
-def generar_tests_para_modulo(ruta_archivo: Path, carpeta_paquete: Path):
+def generar_tests_para_modulo(ruta_archivo: Path):
     """
-    1) Extrae funciones/clases del módulo (ruta_archivo).
-    2) Si hay definiciones, construye un prompt y llama a la API de OpenAI.
-    3) Crea (o sobrescribe) un fichero test_<módulo>.py dentro de DEST_TESTS.
+    1) Extrae funciones y clases de 'ruta_archivo'
+    2) Si no hay definiciones, salta.
+    3) Genera prompt y llama a OpenAI.
+    4) Crea (o sobrescribe) test_<módulo>.py en DEST_TESTS.
     """
-    nombre_modulo = ruta_archivo.stem  # ej.: "mcp_adapter_base"
+    nombre_modulo = ruta_archivo.stem  # ej. "mcp_adapter_base"
     defs = extraer_definiciones_py(ruta_archivo)
 
     if not defs["funciones"] and not defs["clases"]:
-        print(f"   ⚠️ No hay funciones o clases a testear en {ruta_archivo.name}. Se salta.")
+        print(f"   ⚠️ No hay funciones ni clases a testear en {ruta_archivo.name}. Se salta.")
         return
 
     prompt = generar_prompt(
-        nombre_modulo=str(ruta_archivo.relative_to(carpeta_paquete)),
+        nombre_modulo=str(ruta_archivo.relative_to(SRC_ROOT)),
         defs=defs
     )
 
@@ -178,44 +170,45 @@ def generar_tests_para_modulo(ruta_archivo: Path, carpeta_paquete: Path):
 
 def generar_tests():
     """
-    1) Carga la API Key de OpenAI.
-    2) Detecta automáticamente el paquete Python en src/.
-    3) Recorre todos los .py (sin __init__.py ni test_*.py) dentro de ese paquete.
-    4) Para cada módulo, invoca a OpenAI y genera un fichero test_<módulo>.py en DEST_TESTS.
+    1) Carga y comprueba la API Key de OpenAI.
+    2) Recorre todos los .py bajo SRC_ROOT (omitidiendo __init__.py y test_*.py).
+    3) Para cada módulo, invoca a OpenAI y genera test_<módulo>.py en DEST_TESTS.
     """
+    # 1) Cargar + comprobar API Key
     try:
         cargar_api_key()
+        print("🔑 OPENAI_API_KEY detectada correctamente.")
     except RuntimeError as e:
         print(e)
         return
-
-    print("🧪 Iniciando generación de tests mediante OpenAI (v1.x)…\n")
 
     try:
-        carpeta_paquete = encontrar_paquete_src()
+        print("☑️ Probando conexión con OpenAI (listado de modelos)…")
+        comprobar_api()
+        print("✅ Conexión con OpenAI OK.\n")
     except RuntimeError as e:
         print(e)
         return
 
-    print(f"📦 Paquete detectado en: {carpeta_paquete}\n")
-
+    # 2) Recolectar todos los archivos .py válidos en SRC_ROOT
     archivos_fuente = [
-        f for f in carpeta_paquete.rglob("*.py")
+        f for f in SRC_ROOT.rglob("*.py")
         if f.name != "__init__.py" and not f.name.startswith("test_")
     ]
 
     if not archivos_fuente:
-        print("⚠️ No se encontraron archivos .py para generar tests.")
+        print("⚠️ No se encontraron archivos .py para procesar bajo 'src/'.")
         return
 
     print(f"🔍 Se van a procesar {len(archivos_fuente)} archivos:\n")
     for f in archivos_fuente:
-        print(f"  • {f.relative_to(carpeta_paquete)}")
+        print(f"  • {f.relative_to(SRC_ROOT)}")
     print()
 
+    # 3) Para cada módulo, generar su test
     for ruta in archivos_fuente:
-        print(f"→ Procesando Módulo: {ruta.relative_to(carpeta_paquete)}")
-        generar_tests_para_modulo(ruta, carpeta_paquete)
+        print(f"→ Procesando Módulo: {ruta.relative_to(SRC_ROOT)}")
+        generar_tests_para_modulo(ruta)
         print()
 
     print("🎉 Generación de tests completada. Revisa la carpeta:", DEST_TESTS, "\n")
