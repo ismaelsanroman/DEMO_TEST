@@ -1,57 +1,62 @@
+# =============================================================================
 # scripts/generate_tests.py
-
+# =============================================================================
 import os
 import ast
 import openai
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
 # -------------------------------------------------------
-# 🔧 CONFIGURACIÓN
+# 🔧 CONFIGURACIÓN (modifica si quieres cambiar rutas o modelo)
 # -------------------------------------------------------
-SRC_ROOT     = Path("src")                           # Carpeta raíz donde están todos los .py
-DEST_TESTS   = Path("testspilot_unittests")          # Carpeta destino para los test_<módulo>.py
-OPENAI_MODEL = "gpt-4"                               # O "gpt-3.5-turbo" si no tienes acceso a GPT-4
+SRC_ROOT     = Path("src")                           # Carpeta raíz donde están todos los .py a testear
+DEST_TESTS   = Path("testspilot_unittests")          # Carpeta destino para volcar test_<módulo>.py
+OPENAI_MODEL = "gpt-4"                               # Puedes usar "gpt-3.5-turbo" si no tienes GPT-4
 # -------------------------------------------------------
 
 
 def cargar_api_key():
     """
-    Carga la variable OPENAI_API_KEY desde .env o desde el entorno.
-    Si no la encuentra, levanta RuntimeError.
+    1) Carga OPENAI_API_KEY desde .env (si existe) o desde la variable de entorno.
+    2) Si no encuentra la clave, levanta RuntimeError para detener todo.
     """
-    load_dotenv()  # lee automáticamente .env si existe
+    load_dotenv()  # lee automáticamente un posible archivo .env
     clave = os.getenv("OPENAI_API_KEY")
     if not clave:
         raise RuntimeError(
             "🚨 No se encontró la variable OPENAI_API_KEY.\n"
-            "   Defínela en un archivo .env o expórtala en tu shell."
+            "   Defínela en un fichero .env o expórtala en tu shell."
         )
     openai.api_key = clave
 
 
-def comprobar_api():
+def comprobar_api_openai():
     """
-    Hace una llamada mínima a la API de OpenAI (listado de modelos) para
-    verificar que la clave es válida y no hay problemas de conexión.
+    Hace un “ping” mínimo a la API de OpenAI para verificar que la clave funciona y hay conexión:
+    - Llamamos a openai.Model.list() y comprobamos que no falle.
+    - Si hay error de autenticación o de conexión, capturamos la excepción y la convertimos en RuntimeError.
     """
     try:
-        # openai.Model.list() regresa un JSON con la lista de modelos disponibles
+        # Esto devuelve una lista de modelos disponibles; si falla, la excepción salta.
         openai.Model.list()
+    except openai.error.AuthenticationError as e:
+        raise RuntimeError(f"❌ Clave de OpenAI inválida o caducada: {e}")
+    except (openai.error.APIConnectionError, requests.exceptions.RequestException) as e:
+        raise RuntimeError(f"❌ No se pudo conectar a OpenAI: {e}")
     except Exception as e:
-        raise RuntimeError(
-            f"❌ Error al conectar con OpenAI o clave inválida: {e}"
-        )
+        raise RuntimeError(f"❌ Error al verificar OpenAI API: {e}")
 
 
 def extraer_definiciones_py(ruta_archivo: Path) -> dict:
     """
-    Dado un archivo .py, parsea el AST y devuelve un dict:
+    Dado un archivo Python (ruta_archivo), parsea el AST y devuelve:
       {
-        "funciones": [("nombre_función", "código de la función"), ...],
-        "clases":    [("NombreClase", "código de la clase"), ...]
+        "funciones": [("nombre_función", "código fuente de la función"), ...],
+        "clases":    [("NombreClase", "código fuente de la clase"), ...]
       }
-    Solo definiciones a nivel superior.
+    Solo recoge definiciones a nivel superior.
     """
     with ruta_archivo.open("r", encoding="utf-8") as f:
         fuente = f.read()
@@ -79,10 +84,10 @@ def extraer_definiciones_py(ruta_archivo: Path) -> dict:
 
 def generar_prompt(nombre_modulo: str, defs: dict) -> str:
     """
-    Construye un prompt en español para pedir tests en pytest para
-    funciones y clases de un módulo.
-    nombre_modulo: ruta relativa (ej. "input/mcp_adapter_base.py")
-    defs: {"funciones": [...], "clases": [...]}
+    Constrúe un prompt en español para pedir a GPT-4 (o gpt-3.5) que genere
+    tests en pytest para todas las funciones y clases del módulo dado.
+    - nombre_modulo: ruta relativa del archivo (ej. "input/mcp_adapter_base.py").
+    - defs: {"funciones": [...], "clases": [...]}
     """
     prompt = (
         f"Genera tests en pytest para el módulo Python '{nombre_modulo}'.\n"
@@ -105,7 +110,7 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
         "2) Importa el módulo con su ruta completa, por ejemplo:\n"
         "   from src.gen_ai_agent_sdk_lib.subcarpeta import módulo\n"
         "3) Usa nombres descriptivos en las funciones de test (español o inglés).\n"
-        "4) Añade comentarios breves explicando qué prueba cada test.\n\n"
+        "4) Incluye comentarios breves explicando qué prueba cada test.\n\n"
         "Devuélvelo TODO en un único bloque de código Python válido.\n"
     )
     return prompt
@@ -113,14 +118,14 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
 
 def llamada_openai_chat(prompt: str) -> str:
     """
-    Llama a la API de OpenAI (openai>=1.0.0) usando el endpoint de chat completions.
-    Retorna el contenido del primer message de la respuesta.
+    Llama a la API de OpenAI (v1.x) usando el endpoint de chat completions.
+    Retorna únicamente el contenido del mensaje generado por GPT.
     """
     respuesta = openai.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
-            {"role": "system",  "content": "Eres un experto en generar tests en pytest para código Python."},
-            {"role": "user",    "content": prompt}
+            {"role": "system", "content": "Eres un experto en generar tests en pytest para código Python."},
+            {"role": "user",   "content": prompt}
         ],
         temperature=0.2,
         max_tokens=2000,
@@ -131,12 +136,12 @@ def llamada_openai_chat(prompt: str) -> str:
 
 def generar_tests_para_modulo(ruta_archivo: Path):
     """
-    1) Extrae funciones y clases de 'ruta_archivo'
-    2) Si no hay definiciones, salta.
-    3) Genera prompt y llama a OpenAI.
-    4) Crea (o sobrescribe) test_<módulo>.py en DEST_TESTS.
+    1) Extrae funciones y clases de 'ruta_archivo'.
+    2) Si no hay definiciones, imprime aviso y retorna.
+    3) Construye el prompt y llama a OpenAI.
+    4) Crea (o sobrescribe) un fichero test_<módulo>.py en DEST_TESTS.
     """
-    nombre_modulo = ruta_archivo.stem  # ej. "mcp_adapter_base"
+    nombre_modulo = ruta_archivo.stem  # ej: "mcp_adapter_base"
     defs = extraer_definiciones_py(ruta_archivo)
 
     if not defs["funciones"] and not defs["clases"]:
@@ -170,11 +175,15 @@ def generar_tests_para_modulo(ruta_archivo: Path):
 
 def generar_tests():
     """
-    1) Carga y comprueba la API Key de OpenAI.
-    2) Recorre todos los .py bajo SRC_ROOT (omitidiendo __init__.py y test_*.py).
-    3) Para cada módulo, invoca a OpenAI y genera test_<módulo>.py en DEST_TESTS.
+    Flujo principal:
+    1) Carga y comprueba la OPENAI_API_KEY.
+    2) Verifica que la conexión a OpenAI funcione.
+    3) Recorre todos los .py bajo SRC_ROOT (salta __init__.py y test_*.py).
+    4) Genera tests para cada módulo y los vuelca en DEST_TESTS.
     """
-    # 1) Cargar + comprobar API Key
+    # ------------------------------------------------
+    # 1) Carga de la clave y chequeo inicial
+    # ------------------------------------------------
     try:
         cargar_api_key()
         print("🔑 OPENAI_API_KEY detectada correctamente.")
@@ -184,13 +193,15 @@ def generar_tests():
 
     try:
         print("☑️ Probando conexión con OpenAI (listado de modelos)…")
-        comprobar_api()
+        comprobar_api_openai()
         print("✅ Conexión con OpenAI OK.\n")
     except RuntimeError as e:
         print(e)
         return
 
-    # 2) Recolectar todos los archivos .py válidos en SRC_ROOT
+    # ------------------------------------------------
+    # 2) Recuperar lista de archivos .py a procesar
+    # ------------------------------------------------
     archivos_fuente = [
         f for f in SRC_ROOT.rglob("*.py")
         if f.name != "__init__.py" and not f.name.startswith("test_")
@@ -205,7 +216,9 @@ def generar_tests():
         print(f"  • {f.relative_to(SRC_ROOT)}")
     print()
 
-    # 3) Para cada módulo, generar su test
+    # ------------------------------------------------
+    # 3) Generación de tests por cada módulo encontrado
+    # ------------------------------------------------
     for ruta in archivos_fuente:
         print(f"→ Procesando Módulo: {ruta.relative_to(SRC_ROOT)}")
         generar_tests_para_modulo(ruta)
