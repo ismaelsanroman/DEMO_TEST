@@ -4,51 +4,58 @@
 
 import os
 import ast
-import openai
 import httpx
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Importamos la clase OpenAI que permite inyectar nuestro httpx.Client
+from openai import OpenAI
+
 # -------------------------------------------------------
 # 🔧 CONFIGURACIÓN
 # -------------------------------------------------------
-SRC_ROOT     = Path("src")                           # Carpeta raíz donde están los .py a testear
+SRC_ROOT     = Path("src")                           # Carpeta raíz de los .py a testear
 DEST_TESTS   = Path("testspilot_unittests")          # Carpeta destino para los test_<módulo>.py
-OPENAI_MODEL = "gpt-4"                               # O "gpt-3.5-turbo" si no tienes acceso a GPT-4
+OPENAI_MODEL = "gpt-4"                               # O "gpt-3.5-turbo" si no tienes GPT-4
 # -------------------------------------------------------
 
+# Mantendremos una variable global `client` para referirnos al OpenAI configurado
+client: OpenAI = None
 
-def cargar_api_key_y_config_http_client():
+
+def cargar_api_key_y_config_http_client() -> None:
     """
-    1) Carga OPENAI_API_KEY desde .env o variables de entorno.
-    2) Crea un cliente HTTPX con verify=False y se lo asigna a openai.httpx_client.
-    3) Si no encuentra la clave, lanza RuntimeError.
+    1) Carga OPENAI_API_KEY (desde .env o variables de entorno).
+    2) Crea un httpx.Client con verify=False y lo pasa al constructor de OpenAI.
+    3) Asigna esa instancia a la variable global `client`.
+    4) Si no existe la clave, lanza RuntimeError.
     """
-    load_dotenv()  # Lee variables de .env si existe
+    global client
+
+    load_dotenv()  # Lee .env automáticamente si existe
     clave = os.getenv("OPENAI_API_KEY")
     if not clave:
         raise RuntimeError(
             "🚨 No se encontró la variable OPENAI_API_KEY.\n"
-            "   Defínela en .env o expórtala en tu shell."
+            "   Defínela en un archivo .env o expórtala en tu shell."
         )
-    openai.api_key = clave
 
-    # 📌 Crear cliente HTTPX desactivando verificación SSL
-    cliente_inseguro = httpx.Client(verify=False)
-    # Asignamos el cliente a la librería openai para que use ese HTTP client
-    openai.httpx_client = cliente_inseguro
+    # Creamos un cliente HTTPX que ignora la verificación SSL
+    http_client_inseguro = httpx.Client(verify=False)
+
+    # Construimos nuestra instancia de OpenAI con api_key e http_client
+    client = OpenAI(api_key=clave, http_client=http_client_inseguro)
 
 
-def comprobar_api_openai():
+def comprobar_api_openai() -> None:
     """
-    Intenta listar modelos disponibles usando openai.models.list(),
-    pero la petición se hace con el httpx.Client(verify=False) configurado,
-    de modo que no falle por certificados autofirmados. Si hay cualquier excepción,
-    lanza RuntimeError con un mensaje explicativo.
+    Intenta listar modelos disponibles usando client.models.list().
+    Debido a que client fue creado con httpx.Client(verify=False), no fallará
+    por certificados autofirmados. Si cualquier excepción, lanza RuntimeError.
     """
     try:
-        # A partir de openai>=1.0.0, la forma correcta de listar modelos es:
-        openai.models.list()
+        # A partir de openai>=1.0.0, la forma correcta es:
+        client.models.list()
     except Exception as e:
         raise RuntimeError(
             "❌ Error al conectar con OpenAI:\n"
@@ -63,10 +70,10 @@ def comprobar_api_openai():
 def extraer_definiciones_py(ruta_archivo: Path) -> dict:
     """
     Extrae definiciones de funciones y clases a nivel superior de un .py usando AST.
-    Devuelve un dict con:
+    Devuelve:
       {
-        "funciones": [("nombre_función", "código fuente de la función"), ...],
-        "clases":    [("NombreClase",    "código fuente de la clase"), ...]
+        "funciones": [("nombre_función", "código fuente"), ...],
+        "clases":    [("NombreClase",    "código fuente"), ...]
       }
     """
     with ruta_archivo.open("r", encoding="utf-8") as f:
@@ -96,16 +103,16 @@ def extraer_definiciones_py(ruta_archivo: Path) -> dict:
 def generar_prompt(nombre_modulo: str, defs: dict) -> str:
     """
     Construye un prompt en español para pedir a GPT-4 que genere tests en pytest
-    para las funciones y clases de un módulo dado, cumpliendo con:
+    para las funciones y clases de un módulo dado, siguiendo estos requisitos:
       - pytest markers: @pytest.mark.unit, @pytest.mark.<funcionalidad>, @pytest.mark.<tipo>
-      - Allure decorators: @allure.feature, @allure.story
+      - Decoradores Allure: @allure.feature, @allure.story
       - Logger usage: import logging; logger = logging.getLogger(__name__)
-      - Código formateado para Black, Flake8 e Isort
-      - Complejidad ciclomática baja (idealmente 1-2 por test)
+      - Formato Black, Flake8 e Isort
+      - Complejidad ciclomática baja (1-2 por test)
       - Mutant-testing friendly (tests sencillos con aserciones directas)
 
     - nombre_modulo: ruta relativa (ej. "input/mcp_adapter_base.py")
-    - defs: {"funciones": [("nombre", "código"),], "clases": [("NombreClase", "código"),]}
+    - defs:          {"funciones": [("nombre", "código"),], "clases": [("NombreClase","código"),]}
     """
     prompt = (
         f"### CONTEXTO:\n"
@@ -115,13 +122,13 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
         f"     • @pytest.mark.unit\n"
         f"     • @pytest.mark.<funcionalidad> indicando la funcionalidad principal (p.ej. agents, network, etc.)\n"
         f"     • @pytest.mark.<tipo> indicando si es 'happy_path', 'exception', 'edge_case', etc.\n"
-        f"  2. Cada suite o función de test debe llevar decoradores de Allure para feature y story, p.ej.:\n"
+        f"  2. Cada suite o función de test debe llevar decoradores de Allure para feature y story:\n"
         f"     @allure.feature(\"<Nombre de la funcionalidad>\")\n"
         f"     @allure.story(\"<Historia Concreta o Caso de Uso>\")\n"
         f"  3. Incluir al inicio de cada archivo de test:\n"
         f"     import logging\n"
         f"     logger = logging.getLogger(__name__)\n"
-        f"     y dentro de cada test, usar logger.info(\"<mensaje descriptivo>\") para trazabilidad.\n"
+        f"     y dentro de cada test usar logger.info(\"<mensaje descriptivo>\") para trazabilidad.\n"
         f"  4. El código generado debe pasar **Black**, **Flake8** e **Isort** sin errores:\n"
         f"     • Líneas <= 88 caracteres\n"
         f"     • Importar en tres secciones: Stdlib, bibliotecas de terceros, imports locales.\n"
@@ -132,7 +139,7 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
         f"### DEFINICIONES A TESTEAR:\n"
     )
 
-    # Inserta el código de cada función a testear
+    # Añadimos los bloques de funciones a testear
     if defs["funciones"]:
         prompt += "## FUNCIONES:\n"
         for fname, fcode in defs["funciones"]:
@@ -143,7 +150,7 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
                 f"```\n"
             )
 
-    # Inserta el código de cada clase a testear
+    # Añadimos los bloques de clases a testear
     if defs["clases"]:
         prompt += "\n## CLASES:\n"
         for cname, ccode in defs["clases"]:
@@ -158,7 +165,7 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
         "\n### INSTRUCCIONES ADICIONALES:\n"
         "1) Para cada función o clase, genera tests en pytest que cubran casos:\n"
         "   - Caso nominal (happy path).\n"
-        "   - Edge cases relevantes (inputs vacíos, valores límite, excepciones esperadas).\n"
+        "   - Edge cases (inputs vacíos, valores límite, excepciones esperadas).\n"
         "2) Cada archivo de test debe tener al inicio:\n"
         "   ```python\n"
         "   import pytest\n"
@@ -178,28 +185,28 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
         "       logger.info(\"<Mensaje descriptivo de inicio de test>\")\n"
         "       # Llamada a la función/clase y aserciones\n"
         "   ```\n"
-        "4) Cada test debe tener aserciones claras:\n"
+        "4) Cada test debe usar aserciones claras:\n"
         "   - `assert` simples comparando valores concretos.\n"
         "   - No introducir lógica condicional compleja dentro del test.\n"
-        "5) Organizar las importaciones en este orden:\n"
+        "5) Importaciones en este orden:\n"
         "   - Módulos estándar de Python\n"
         "   - Bibliotecas de terceros (pytest, allure, requests, etc.)\n"
         "   - Imports locales (`from src.gen_ai_agent_sdk_lib.<subpaquete> import <módulo>`)\n"
-        "   Asegúrate de que pasa `isort --profile black`.\n"
-        "6) Formatea el archivo final con `black` (líneas <= 88 caracteres, comillas dobles) y\n"
-        "   revisa que `flake8` no dé errores.\n"
-        "7) Mantén una complejidad ciclomática por test de 1 o 2 (no más de un condicional simple).\n"
-        "8) Evita bloques `try/except` dentro de los tests; si esperas excepciones, usa:\n"
+        "   Asegúrate de que pase `isort --profile black`.\n"
+        "6) Formatea el archivo con `black` (líneas <= 88 caracteres) y revisa con `flake8`.\n"
+        "7) Complejidad ciclomática por test: 1 o 2 (no más de un condicional sencillo).\n"
+        "8) No uses `try/except` dentro de los tests; si esperas excepciones, usa:\n"
         "   ```python\n"
         "   with pytest.raises(<ExcepciónEsperada>):\n"
         "       <llamada que dispara la excepción>\n"
         "   ```\n"
-        "9) La estructura de los tests debe quedar en:\n"
-        "   `testspilot_unittests/test_<nombre_modulo>.py`\n"
-        "10) Devuélvelo TODO en un único bloque de código Python completo, sin explicaciones.\n\n"
-        "### EJEMPLO DE MÓDULO A TESTEAR / CASO CONCRETO:\n"
-        "- Supongamos que el módulo define una función `send_instruction` que hace una petición HTTP\n"
-        "  y decodifica JSON. Queremos tests que cubran respuesta válida y respuesta con JSON inválido.\n\n"
+        "9) Estructura final: `testspilot_unittests/test_<nombre_modulo>.py`.\n"
+        "10) Devuélvelo TODO en un solo bloque de código Python, sin explicaciones.\n\n"
+        "### EJEMPLO CONCRETO:\n"
+        "- Supongamos que el módulo define `send_instruction` que hace petición HTTP y parsea JSON.\n"
+        "  Queremos cubrir:\n"
+        "  a) Respuesta válida (devuelve dict esperado).\n"
+        "  b) Respuesta con JSON inválido (lanza JSONDecodeError).\n\n"
         "#### Ejemplo de función a testear:\n"
         "```python\n"
         "def send_instruction(instruction: str) -> dict:\n"
@@ -208,7 +215,7 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
         "    data = response.json()\n"
         "    return data\n"
         "```\n\n"
-        "#### Ahora genera los tests completos (pytest, allure, logger, marcadores, formato Black/Isort/Flake8, etc.)\n"
+        "#### Ahora genera los tests completos (pytest, allure, logger, marcadores, formateo Black/Isort/Flake8, etc.)\n"
     )
 
     return prompt
@@ -216,10 +223,10 @@ def generar_prompt(nombre_modulo: str, defs: dict) -> str:
 
 def llamada_openai_chat(prompt: str) -> str:
     """
-    Llama a la API de OpenAI (v1.x) usando el httpx.Client con verify=False,
-    y retorna el texto del primer mensaje (que contendrá los tests en pytest).
+    Llama a la API de OpenAI usando la instancia `client`, que ya está
+    configurada con httpx.Client(verify=False). Retorna el texto generado.
     """
-    respuesta = openai.chat.completions.create(
+    respuesta = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Eres un experto en generar tests en pytest para código Python."},
@@ -232,7 +239,7 @@ def llamada_openai_chat(prompt: str) -> str:
     return respuesta.choices[0].message.content.strip()
 
 
-def generar_tests_para_modulo(ruta_archivo: Path):
+def generar_tests_para_modulo(ruta_archivo: Path) -> None:
     """
     1) Extrae definiciones de funciones y clases del archivo.
     2) Si no hay definiciones, imprime aviso y retorna.
@@ -271,10 +278,10 @@ def generar_tests_para_modulo(ruta_archivo: Path):
         print(f"   ❌ No se pudo escribir {archivo_test}: {e}")
 
 
-def generar_tests():
+def generar_tests() -> None:
     """
     Flujo principal:
-    1) Carga la API Key y configura el httpx.Client con verify=False.
+    1) Carga la API Key y configura httpx.Client(verify=False).
     2) Verifica la conexión a la API de OpenAI (listado de modelos).
     3) Recorre todos los .py en 'src/' (omitendo __init__.py y test_*.py).
     4) Para cada módulo, genera su test en pytest y lo guarda en DEST_TESTS.
@@ -284,7 +291,7 @@ def generar_tests():
     # ------------------------------------------------
     try:
         cargar_api_key_y_config_http_client()
-        print("🔑 OPENAI_API_KEY detectada correctamente y httpx.Client(verify=False) configurado.")
+        print("🔑 OPENAI_API_KEY detectada y httpx.Client(verify=False) configurado.")
     except RuntimeError as e:
         print(e)
         return
@@ -304,8 +311,8 @@ def generar_tests():
     # 3) Recoge todos los archivos .py válidos
     # ------------------------------------------------
     archivos_fuente = [
-        f for f in SRC_ROOT.rglob("*.py")
-        if f.name != "__init__.py" and not f.name.startswith("test_")
+        archivo for archivo in SRC_ROOT.rglob("*.py")
+        if archivo.name != "__init__.py" and not archivo.name.startswith("test_")
     ]
 
     if not archivos_fuente:
