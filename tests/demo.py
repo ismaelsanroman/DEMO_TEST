@@ -1,55 +1,39 @@
-#!/usr/bin/env python3
-import os
-import sys
-import subprocess
+# 4️⃣ Parsea el dump (NDJSON + corchetes + comas)
+jobs = []
+with open(full_report, 'r', encoding='utf-8') as f:
+    for line in f:
+        line = line.strip()
+        # Saltar arranque/final de array y líneas vacías
+        if not line or line in ('[', ']'):
+            continue
+        # Quitar coma final si la hubiera
+        if line.endswith(','):
+            line = line[:-1]
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Línea inválida, salto: {e}")
+            continue
+        jobs.append(obj)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-CONFIG = os.path.join(ROOT, 'config.toml')
-DB = os.path.join(ROOT, 'cr_session.sqlite')
-# PARSER = os.path.join(HERE, 'parse_mutation_report.py')
-
-def run(cmd, **kwargs):
-    print(f"🛠 Ejecutando --> {' '.join(cmd)}")
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, **kwargs)
-        print(result.stdout)
-        if result.stderr:
-            print(f"[stderr] {result.stderr}")
-        return result
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Error al ejecutar: {' '.join(cmd)}")
-        print(e.stdout)
-        print(e.stderr)
-        sys.exit(1)
-
-def main():
-    print(f"📁 Ruta esperada de la BD: {DB}")
-
-    # 1. Realiza el Init de cosmic-ray si no existe la base de datos
-    if not os.path.exists(DB):
-        print("🧪 No se encontró la base de datos. Generando con 'cosmic-ray init'...")
-        run([sys.executable, '-m', 'cosmic_ray.cli', 'init', CONFIG, DB, '--force'])
-
-        if not os.path.exists(DB):
-            print(f"❌ Error: No se pudo crear la base de datos en {DB}.")
-            sys.exit(1)
+total = 0
+killed = 0
+for job in jobs:
+    if isinstance(job, dict):
+        muts = job.get('mutations') or job.get('results') or []
+    elif isinstance(job, list):
+        muts = job
     else:
-        print(f"✅ {DB} ya existe, saltando init.")
+        continue
 
-    # 2. Ejecuta los mutantes
-    run([sys.executable, '-m', 'cosmic_ray.cli', 'exec', CONFIG, DB])
+    total += len(muts)
+    killed += sum(1 for m in muts if m.get('test_outcome') == 'killed')
 
-    # 3. Vuelca toda la sesión a un JSON
-    full_report = os.path.join(ROOT, 'full_report.json')
-    with open(full_report, 'w') as out:
-        run([sys.executable, '-m', 'cosmic_ray.cli', 'dump', DB], stdout=out)
-    print(f"🟢 Reporte completo guardado en: {full_report}")
+score = (killed / total) * 100 if total else 0.0
+print(f"💥 Mutation score: {score:.1f}% ({killed}/{total} mutantes)")
 
-    # 4. TODO: Solucionar el parseo del JSON
-    # run([sys.executable, PARSER, full_report])
-
-    return 0
-
-if __name__ == '__main__':
-    sys.exit(main())
+if score < MUTATING_MIN_SCORE:
+    print(f"❌ Falla: mínimo {MUTATING_MIN_SCORE}%, obtenido {score:.1f}%")
+    sys.exit(1)
+else:
+    print("✅ Mutation testing PASSED")
