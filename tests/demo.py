@@ -1,126 +1,225 @@
-# 🧪 Pre-Commit Hooks & Mutation Testing
+#!/usr/bin/env python3
+"""
+mutation_check.py
 
-Este repositorio cuenta con una configuración de *pre-commit* avanzada que integra diversas herramientas para garantizar calidad de código, limpieza, y robustez en los tests mediante *mutation testing*. A continuación se explica cada herramienta, cómo está configurada y cómo se puede ejecutar tanto de forma individual como en conjunto.
+This script orchestrates mutation testing using Cosmic Ray. It:
+1. Initializes the Cosmic Ray database if not already present.
+2. Executes the mutation testing session.
+3. Dumps the full session to a JSON file.
+4. Parses the JSON report to compute metrics.
+5. Saves the list of surviving mutants to a separate JSON.
+6. Calculates and prints the mutation score, failing if below threshold.
+"""
 
----
+import sys
+import json
+import logging
+import subprocess
+import argparse
+from pathlib import Path
+from typing import List, Dict, Tuple
 
-## ⚙️ Hooks configurados
+# Default configuration constants
+DEFAULT_CONFIG = Path(__file__).parent.parent / "config.toml"
+DEFAULT_DB = Path(__file__).parent.parent / "cr_session.sqlite"
+DEFAULT_LOG_DIR = Path(__file__).parent.parent / "logs"
+DEFAULT_MIN_SCORE = 80.0
 
-### ✅ `ruff`
 
-- **Función:** Linting y formateo con una herramienta rápida y moderna que reemplaza `flake8`, `black`, `isort`.
-- **Uso en pre-commit:** Automáticamente revisa y formatea el código.
-- **Ejecución manual:**
-    
-    ```bash
-    pipenv run ruff check src
-    pipenv run ruff format src
-    
-    ```
-    
+def setup_logging() -> None:
+    """
+    Configure the logging format and level.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s: %(message)s"
+    )
 
-### 🔤 `codespell`
 
-- **Función:** Detecta errores tipográficos comunes.
-- **Ignora:** palabras del fichero `.codespell.ignorewords`.
-- **Ejecución manual:**
-    
-    ```bash
-    pipenv run codespell --ignore-words .codespell.ignorewords --skip=.venv
-    
-    ```
-    
+def run_command(cmd: List[str]) -> None:
+    """
+    Execute a system command, capture its output, and abort on failure.
 
-### 🧮 `xenon-complexity`
+    Args:
+        cmd: The command and arguments to execute.
+    """
+    logging.info("Running command: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        logging.info(result.stdout.strip())
+    if result.returncode != 0:
+        logging.error("Command failed (exit %d): %s", result.returncode, result.stderr.strip())
+        sys.exit(result.returncode)
 
-- **Función:** Evalúa la complejidad ciclomática de módulos.
-- **Restricciones:**
-    - `-max-absolute B`
-    - `-max-modules B`
-    - `-max-average B`
-- **Ejecución manual:**
-    
-    ```bash
-    pipenv run python -m xenon --max-absolute B --max-modules B --max-average B ./src/gen_ai_agent_sdk_lib
-    
-    ```
-    
 
-### 🧬 `mutation-testing`
+def initialize_database(config: Path, db: Path) -> None:
+    """
+    Initialize the Cosmic Ray database if it does not exist.
 
-- **Función:** Ejecuta tests sobre mutaciones generadas con `cosmic-ray` y exige un mínimo de mutantes "muertos" (detenidos por los tests).
-- **Score mínimo requerido:** `80%`
-- **Salida:** Reporte en `logs/mutating_testing_report.json`
-- **Ejecución manual:**
-    
-    ```bash
-    pipenv run python scripts/mutation_check.py
-    
-    ```
-    
+    Args:
+        config: Path to the `config.toml` for Cosmic Ray.
+        db: Path to the SQLite database file.
+    """
+    if not db.exists():
+        logging.info("Database not found, initializing: %s", db)
+        run_command(["cosmic-ray", "init", str(config), str(db), "--force"])
+    else:
+        logging.info("Database already exists, skipping initialization.")
 
----
 
-## 🔁 Ejecución de todos los hooks
+def execute_mutations(config: Path, db: Path) -> None:
+    """
+    Execute the mutation testing session.
 
-Puedes ejecutar todos los hooks configurados en `pre-commit-config.yaml` con:
+    Args:
+        config: Path to the `config.toml` for Cosmic Ray.
+        db: Path to the SQLite database file.
+    """
+    run_command(["cosmic-ray", "exec", str(config), str(db)])
 
-```bash
-pipenv run pre-commit run --all-files
 
-```
+def dump_to_json(db: Path, report: Path) -> None:
+    """
+    Dump the full Cosmic Ray session to JSON.
 
-Esto te permite validar todo el proyecto antes de realizar un `commit`, garantizando que el código cumpla los estándares definidos.
+    Args:
+        db: Path to the SQLite database file.
+        report: Path where the JSON report will be saved.
+    """
+    report.parent.mkdir(parents=True, exist_ok=True)
+    logging.info("Dumping full report to JSON: %s", report)
+    with report.open("w", encoding="utf-8") as f:
+        result = subprocess.run(
+            ["cosmic-ray", "dump", str(db)],
+            stdout=f,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+    if result.returncode != 0:
+        logging.error("Failed to dump report: %s", result.stderr.strip())
+        sys.exit(result.returncode)
 
----
 
-## 📂 Archivos clave
+def parse_report(report: Path) -> List[Dict]:
+    """
+    Parse the line-delimited JSON report into Python objects.
 
-| Archivo | Descripción |
-| --- | --- |
-| `.pre-commit-config.yaml` | Define los hooks y sus parámetros. |
-| `pyproject.toml` | Contiene configuración de `ruff`, `xenon`, `coverage`, `cosmic-ray`, `pytest`, `hypothesis`. |
-| `scripts/mutation_check.py` | Script personalizado para ejecutar `cosmic-ray`, analizar resultados y forzar exit si el score es bajo. |
-| `config.toml` | Configuración detallada de `cosmic-ray`: runner, timeout, exclusiones, etc. |
-| `cr_session.sqlite` | Base de datos usada por `cosmic-ray`. |
-| `logs/mutating_testing_report.json` | Salida en formato JSON del reporte de mutantes. |
+    Args:
+        report: Path to the dumped JSON file.
 
----
+    Returns:
+        A list of parsed JSON objects.
+    """
+    jobs: List[Dict] = []
+    for line in report.read_text(encoding="utf-8").splitlines():
+        text = line.strip().rstrip(",")
+        if text in ("", "[", "]"):
+            continue
+        try:
+            jobs.append(json.loads(text))
+        except json.JSONDecodeError as e:
+            logging.warning("Skipped invalid JSON line: %s", e)
+    return jobs
 
-## 📊 Resultado esperado en consola
 
-- Al fallar:
-    
-    ```
-    Mutation score: 50.0% (3/6 total mutants killed)
-    --- Mutation testing FAILED: minimum 80.0%, obtained 50.0%
-    
-    ```
-    
-- Al pasar:
-    
-    ```
-    Mutation score: 87.5% (14/16 total mutants killed)
-    Mutation testing PASSED
-    
-    ```
-    
+def calculate_metrics(jobs: List[Dict]) -> Tuple[int, int, List[Dict]]:
+    """
+    Calculate the number of killed mutants and collect survivors.
 
----
+    Args:
+        jobs: List of parsed JSON objects from the report.
 
-## 📌 Recomendaciones
+    Returns:
+        A tuple (killed_count, total_mutants, survivors_list).
+    """
+    total = 0
+    killed = 0
+    survivors: List[Dict] = []
 
-- ⚠️ Si un hook falla, corrige antes de hacer commit.
-- 🔁 Ejecuta `pre-commit run --all-files` antes de subir cambios a `main`.
-- 🧪 Revisa mutantes vivos: pueden indicar tests incompletos.
+    for job in jobs:
+        # Extract mutation entries
+        if isinstance(job, dict):
+            mutants = job.get("mutations") or job.get("results") or []
+        elif isinstance(job, list):
+            mutants = job
+        else:
+            continue
 
----
+        total += len(mutants)
+        for m in mutants:
+            outcome = m.get("test_outcome")
+            if outcome == "killed":
+                killed += 1
+            else:
+                survivors.append({
+                    "module_path": m.get("module_path"),
+                    "operator_name": m.get("operator_name"),
+                    "occurrence": m.get("occurrence"),
+                    "test_outcome": outcome,
+                    "worker_outcome": m.get("worker_outcome"),
+                    "output": m.get("output"),
+                    "diff": m.get("diff"),
+                })
 
-Si necesitas ejecutar alguna parte de este sistema de forma separada, recuerda activar primero el entorno:
+    return killed, total, survivors
 
-```bash
-pipenv shell
 
-```
+def save_survivors(survivors: List[Dict], log_dir: Path) -> Path:
+    """
+    Save the list of surviving mutants to a JSON file.
 
-Y luego ejecutar los comandos indicados para cada herramienta. Este entorno garantiza que todas las dependencias estén controladas y alineadas con el proyecto.
+    Args:
+        survivors: List of surviving mutant dictionaries.
+        log_dir: Directory where the output will be saved.
+
+    Returns:
+        Path to the saved JSON file.
+    """
+    output_path = log_dir / "mutants_survived.json"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(survivors, indent=2), encoding="utf-8")
+    logging.info("Saved %d surviving mutants to %s", len(survivors), output_path)
+    return output_path
+
+
+def main() -> int:
+    """
+    Main entry point: parse arguments, run the mutation workflow, and report metrics.
+    """
+    parser = argparse.ArgumentParser(description="Run mutation testing via Cosmic Ray and report survivors.")
+    parser.add_argument("--config", "-c", type=Path, default=DEFAULT_CONFIG,
+                        help="Path to the Cosmic Ray config.toml")
+    parser.add_argument("--db", "-d", type=Path, default=DEFAULT_DB,
+                        help="Path to the Cosmic Ray SQLite database")
+    parser.add_argument("--log-dir", "-l", type=Path, default=DEFAULT_LOG_DIR,
+                        help="Directory for JSON report outputs")
+    parser.add_argument("--min-score", "-m", type=float, default=DEFAULT_MIN_SCORE,
+                        help="Minimum kill rate (%) to consider the test suite passing")
+    args = parser.parse_args()
+
+    setup_logging()
+    initialize_database(args.config, args.db)
+    execute_mutations(args.config, args.db)
+
+    report_file = args.log_dir / "mutating_testing_report.json"
+    dump_to_json(args.db, report_file)
+
+    jobs = parse_report(report_file)
+    killed, total, survivors = calculate_metrics(jobs)
+
+    if survivors:
+        save_survivors(survivors, args.log_dir)
+
+    score = (killed / total) * 100 if total else 0.0
+    logging.info("Mutation score: %.1f%% (%d/%d killed)", score, killed, total)
+
+    if score < args.min_score:
+        logging.error("Mutation testing FAILED: minimum %.1f%%, obtained %.1f%%", args.min_score, score)
+        return 1
+
+    logging.info("Mutation testing PASSED (>= %.1f%%)", args.min_score)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
