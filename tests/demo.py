@@ -44,15 +44,20 @@ def dump_to_json(db: Path, report: Path) -> None:
         sys.exit(result.returncode)
 
 def parse_report(report: Path) -> List[Dict]:
-    jobs: List[Dict] = []
-    for line in report.read_text(encoding="utf-8").splitlines():
-        line = line.strip().rstrip(",")
-        if line and not line.startswith("[") and not line.endswith("]"):
-            try:
-                jobs.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                logging.warning("Skipped invalid JSON line: %s", e)
-    return jobs
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+        # Caso 1: Lista de jobs directamente
+        if isinstance(data, list) and all(isinstance(i, dict) for i in data):
+            return data
+        # Caso 2: Lista dentro de otra lista
+        elif isinstance(data, list) and len(data) == 1 and isinstance(data[0], list):
+            return data[0]
+        else:
+            logging.error("Formato inesperado en el JSON de reporte")
+            return []
+    except json.JSONDecodeError as e:
+        logging.error("Fallo al parsear JSON: %s", e)
+        return []
 
 def calculate_metrics(jobs: List[Dict]) -> Tuple[int, int, List[Dict]]:
     total = 0
