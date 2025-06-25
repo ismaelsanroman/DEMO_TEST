@@ -141,43 +141,43 @@ def calculate_metrics(jobs: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[s
     """
     Compute killed count, total mutants, and collect surviving mutants.
 
-    Each job['mutations'] is actually a flat list of two dicts per mutant:
-    - the first dict: metadata (module_path, operator_name, occurrence…)
-    - the second dict: result (worker_outcome, test_outcome, diff…)
+    Args:
+        jobs: List of job dictionaries, each with a "mutations" list.
 
-    We iterate en pasos de 2 para procesar cada par.
+    Returns:
+        killed: number of mutants killed by tests
+        total: total number of mutants generated
+        survivors: list of surviving mutant dicts (with key details)
     """
     total = 0
     killed = 0
     survivors: List[Dict[str, Any]] = []
 
     for job in jobs:
-        muts = job.get("mutations", [])
-        # iterate en pares: [meta0, res0, meta1, res1, …]
-        for i in range(0, len(muts), 2):
-            meta = muts[i]
-            result = muts[i+1] if i+1 < len(muts) else {}
-            total += 1
-
-            outcome = result.get("test_outcome")
+        mutations = job.get("mutations", [])
+        if not isinstance(mutations, list):
+            continue
+        total += len(mutations)
+        for m in mutations:
+            outcome = m.get("test_outcome")
             if outcome == "killed":
                 killed += 1
             else:
-                # sólo añado a survivors si tengo al menos la metadata
-                if meta.get("module_path") or meta.get("operator_name") is not None:
+                # include only if key fields are present
+                if any(m.get(k) for k in ("module_path", "operator_name", "occurrence")):
                     survivors.append({
-                        "module_path": meta.get("module_path"),
-                        "operator_name": meta.get("operator_name"),
-                        "occurrence": meta.get("occurrence"),
+                        "module_path": m.get("module_path"),
+                        "operator_name": m.get("operator_name"),
+                        "occurrence": m.get("occurrence"),
                         "test_outcome": outcome,
-                        "worker_outcome": result.get("worker_outcome"),
-                        "output": result.get("output"),
-                        "diff": result.get("diff"),
+                        "worker_outcome": m.get("worker_outcome"),
+                        "output": m.get("output"),
+                        "diff": m.get("diff"),
                     })
 
     logging.info("Metrics computed: %d total, %d killed, %d survived", total, killed, len(survivors))
     return killed, total, survivors
-    
+
 
 def save_survivors(survivors: List[Dict[str, Any]], log_dir: Path) -> None:
     """
