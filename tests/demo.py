@@ -218,7 +218,7 @@ def save_markdown_summary(killed: int, total: int, survivors: List[Dict[str, Any
         "|------|----------|---------|",
     ]
     for s in survivors:
-        md_lines.append(f"| {s['module_path']} | {s['operator_name']} | {s['test_outcome']} |")
+        md_lines.append(f"| `{s['module_path']}` | `{s['operator_name']}` | `{s['test_outcome']}` |")
 
     md_path = log_dir / "mutation_summary.md"
     md_path.write_text("\n".join(md_lines), encoding="utf-8")
