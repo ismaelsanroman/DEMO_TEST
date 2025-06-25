@@ -142,13 +142,34 @@ def calculate_metrics(jobs: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[s
     Compute killed count, total mutants, and collect surviving mutants.
 
     Args:
-        jobs: List of job dictionaries, each with a "mutations" list.
+        jobs: List of job dictionaries (o lista plana de mutantes).
 
     Returns:
-        killed: number of mutants killed by tests
-        total: total number of mutants generated
-        survivors: list of surviving mutant dicts (with key details)
+        killed: número de mutantes “killed”
+        total: mutantes totales
+        survivors: lista de dicts con los mutantes supervivientes
     """
+    # ── Caso 1: dump es NDJSON plano: cada entry ES un mutante
+    if jobs and isinstance(jobs[0], dict) and 'test_outcome' in jobs[0] and 'mutations' not in jobs[0]:
+        total = len(jobs)
+        killed = sum(1 for m in jobs if m.get('test_outcome') == 'killed')
+        survivors: List[Dict[str, Any]] = []
+        for m in jobs:
+            if m.get('test_outcome') != 'killed':
+                if any(m.get(k) is not None for k in ("module_path", "operator_name", "occurrence")):
+                    survivors.append({
+                        "module_path":    m.get("module_path"),
+                        "operator_name":  m.get("operator_name"),
+                        "occurrence":     m.get("occurrence"),
+                        "test_outcome":   m.get("test_outcome"),
+                        "worker_outcome": m.get("worker_outcome"),
+                        "output":         m.get("output"),
+                        "diff":           m.get("diff"),
+                    })
+        logging.info(f"Metrics computed (flat): {total} total, {killed} killed, {len(survivors)} survived")
+        return killed, total, survivors
+
+    # ── Caso 2: formato “jobs” con lista en 'mutations'
     total = 0
     killed = 0
     survivors: List[Dict[str, Any]] = []
@@ -157,25 +178,25 @@ def calculate_metrics(jobs: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[s
         mutations = job.get("mutations", [])
         if not isinstance(mutations, list):
             continue
+
         total += len(mutations)
         for m in mutations:
-            outcome = m.get("test_outcome")
+            outcome = m.get("test_outcome") or m.get("outcome") or m.get("worker_outcome")
             if outcome == "killed":
                 killed += 1
             else:
-                # include only if key fields are present
-                if any(m.get(k) for k in ("module_path", "operator_name", "occurrence")):
+                if any(m.get(k) is not None for k in ("module_path", "operator_name", "occurrence")):
                     survivors.append({
-                        "module_path": m.get("module_path"),
-                        "operator_name": m.get("operator_name"),
-                        "occurrence": m.get("occurrence"),
-                        "test_outcome": outcome,
+                        "module_path":    m.get("module_path"),
+                        "operator_name":  m.get("operator_name"),
+                        "occurrence":     m.get("occurrence"),
+                        "test_outcome":   outcome,
                         "worker_outcome": m.get("worker_outcome"),
-                        "output": m.get("output"),
-                        "diff": m.get("diff"),
+                        "output":         m.get("output"),
+                        "diff":           m.get("diff"),
                     })
 
-    logging.info("Metrics computed: %d total, %d killed, %d survived", total, killed, len(survivors))
+    logging.info(f"Metrics computed: {total} total, {killed} killed, {len(survivors)} survived")
     return killed, total, survivors
 
 
