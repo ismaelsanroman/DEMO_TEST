@@ -6,10 +6,11 @@ This script orchestrates mutation testing using Cosmic Ray. It:
 1. Initializes the Cosmic Ray database if not already present.
 2. Executes the mutation testing session.
 3. Dumps the full session to a JSON file.
-4. Parses the JSON report to compute metrics.
-5. Saves the list of surviving mutants to a separate JSON.
-6. Generates a Markdown summary report.
-7. Calculates and prints the mutation score, failing if below threshold.
+4. Parses the JSON report (including nested arrays or NDJSON) into a flat list of jobs.
+5. Computes mutation metrics: total mutants, killed, survivors.
+6. Writes surviving mutants to JSON.
+7. Generates a Markdown summary report.
+8. Exits with failure if the mutation score is below the configured threshold.
 """
 
 import sys
@@ -18,28 +19,26 @@ import logging
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 
-# Default configuration paths and thresholds
+# Default paths and thresholds
 DEFAULT_CONFIG = Path(__file__).parent.parent / "config.toml"
 DEFAULT_DB = Path(__file__).parent.parent / "cr_session.sqlite"
 DEFAULT_LOG_DIR = Path(__file__).parent.parent / "logs"
-DEFAULT_MIN_SCORE = 80.0  # minimum acceptable mutation score (%)
+DEFAULT_MIN_SCORE = 80.0  # minimum acceptable kill rate (%)
 
 
 def setup_logging() -> None:
-    """
-    Configure basic logging format and level.
-    """
+    """Configure basic logging format and level."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def run_command(cmd: List[str]) -> None:
     """
-    Execute a system command and abort on failure.
+    Execute a system command, log its output, and abort on failure.
 
     Args:
-        cmd: List of command arguments to execute.
+        cmd: List of command-line arguments.
     """
     logging.info("Running command: %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -98,81 +97,64 @@ def dump_to_json(db: Path, report: Path) -> None:
         sys.exit(result.returncode)
 
 
-def parse_report(report: Path) -> List[Dict]:
+def parse_report(report: Path) -> List[Dict[str, Any]]:
     """
-    Read any variant of JSON (plain array, nested array, or NDJSON)
-    and extract all mutation jobs into a flat list of dicts.
-
-    Args:
-        report: Path to the dumped JSON report.
-
-    Returns:
-        A list of job dictionaries, each containing 'job_id' and 'mutations'.
+    Parse the Cosmic Ray JSON dump into a flat list of job dictionaries.
+    This handles:
+      - A single JSON array of jobs.
+      - A nested array ([[ ... ]]).
+      - Line-delimited JSON (NDJSON) with optional commas.
     """
-    text = report.read_text(encoding="utf-8").strip()
-    # First attempt: parse as standard JSON
-    try:
-        data = json.loads(text)
-        # Case: nested array [[...]]
-        if isinstance(data, list) and len(data) == 1 and isinstance(data[0], list):
-            return data[0]
-        # Case: flat array of job dicts
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        pass
+    text = report.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    jobs: List[Any] = []
 
-    # Fallback: incremental parsing of NDJSON or malformed JSON arrays
-    jobs: List[Dict] = []
-    decoder = json.JSONDecoder()
-    idx = 0
-    length = len(text)
-
-    # skip leading '[' if present
-    if idx < length and text[idx] == "[":
-        idx += 1
-
-    # parse one JSON object at a time
-    while idx < length:
-        # skip whitespace and commas
-        while idx < length and text[idx] in " \r\n\t,":
-            idx += 1
-        if idx >= length or text[idx] == "]":
-            break
+    for line in lines:
+        stripped = line.strip().rstrip(',')
+        # skip empty lines or bracket markers
+        if not stripped or stripped in ('[', ']'):
+            continue
         try:
-            obj, consumed = decoder.raw_decode(text[idx:])
+            obj = json.loads(stripped)
         except json.JSONDecodeError as e:
-            logging.warning("Could not parse JSON at position %d: %s", idx, e)
-            break
-        # if it's a dict, add directly
-        if isinstance(obj, dict):
-            jobs.append(obj)
-        # if it's a list, unpack any dict entries
-        elif isinstance(obj, list):
-            for entry in obj:
-                if isinstance(entry, dict):
-                    jobs.append(entry)
-        idx += consumed
+            logging.warning("Skipped invalid JSON line: %s", e)
+            continue
+        jobs.append(obj)
 
-    return jobs
+    # Flatten if any entry is itself a list of jobs
+    flat_jobs: List[Dict[str, Any]] = []
+    for entry in jobs:
+        if isinstance(entry, list):
+            for sub in entry:
+                if isinstance(sub, dict):
+                    flat_jobs.append(sub)
+        elif isinstance(entry, dict):
+            flat_jobs.append(entry)
+        else:
+            logging.warning("Unexpected entry type in jobs: %r", entry)
+
+    logging.info("Parsed %d job(s) from report", len(flat_jobs))
+    return flat_jobs
 
 
-def calculate_metrics(jobs: List[Dict]) -> Tuple[int, int, List[Dict]]:
+def calculate_metrics(jobs: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[str, Any]]]:
     """
-    Compute the number of killed mutants and collect surviving mutants.
+    Compute killed count, total mutants, and collect surviving mutants.
 
     Args:
-        jobs: List of job dictionaries from parse_report().
+        jobs: List of job dictionaries, each with a "mutations" list.
 
     Returns:
-        A tuple (killed_count, total_mutants, survivors_list).
+        killed: number of mutants killed by tests
+        total: total number of mutants generated
+        survivors: list of surviving mutant dicts (with key details)
     """
     total = 0
     killed = 0
-    survivors: List[Dict] = []
+    survivors: List[Dict[str, Any]] = []
 
     for job in jobs:
-        mutations = job.get("mutations") or []
+        mutations = job.get("mutations", [])
         if not isinstance(mutations, list):
             continue
         total += len(mutations)
@@ -181,7 +163,7 @@ def calculate_metrics(jobs: List[Dict]) -> Tuple[int, int, List[Dict]]:
             if outcome == "killed":
                 killed += 1
             else:
-                # include only if it has at least one non-null key
+                # include only if key fields are present
                 if any(m.get(k) for k in ("module_path", "operator_name", "occurrence")):
                     survivors.append({
                         "module_path": m.get("module_path"),
@@ -193,41 +175,36 @@ def calculate_metrics(jobs: List[Dict]) -> Tuple[int, int, List[Dict]]:
                         "diff": m.get("diff"),
                     })
 
+    logging.info("Metrics computed: %d total, %d killed, %d survived", total, killed, len(survivors))
     return killed, total, survivors
 
 
-def save_survivors(survivors: List[Dict], log_dir: Path) -> Path:
+def save_survivors(survivors: List[Dict[str, Any]], log_dir: Path) -> None:
     """
-    Write the list of surviving mutants to a JSON file.
+    Write the surviving mutants to a JSON file.
 
     Args:
-        survivors: List of surviving mutant dictionaries.
-        log_dir: Directory where the output will be saved.
-
-    Returns:
-        Path to the saved JSON file.
+        survivors: list of surviving mutant dicts.
+        log_dir: directory where the file will be created.
     """
     output_path = log_dir / "mutants_survived.json"
     log_dir.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(survivors, indent=2), encoding="utf-8")
     logging.info("Saved %d surviving mutants to %s", len(survivors), output_path)
-    return output_path
 
 
-def save_markdown_summary(killed: int, total: int, survivors: List[Dict], log_dir: Path) -> None:
+def save_markdown_summary(killed: int, total: int, survivors: List[Dict[str, Any]], log_dir: Path) -> None:
     """
-    Generate a Markdown summary report of mutation testing.
+    Generate a Markdown summary of the mutation testing results.
 
     Args:
-        killed: Number of killed mutants.
-        total: Total number of mutants.
-        survivors: List of surviving mutants.
-        log_dir: Directory where the Markdown file will be saved.
+        killed: number of killed mutants.
+        total: total mutants.
+        survivors: list of surviving mutants.
+        log_dir: directory where the Markdown file will be created.
     """
-    md_file = log_dir / "mutation_summary.md"
     score = (killed / total) * 100 if total else 0.0
-
-    lines = [
+    md_lines = [
         "# Mutation Testing Report",
         "",
         f"- **Total mutants**: {total}",
@@ -241,38 +218,30 @@ def save_markdown_summary(killed: int, total: int, survivors: List[Dict], log_di
         "|------|----------|---------|",
     ]
     for s in survivors:
-        lines.append(f"| `{s['module_path']}` | `{s['operator_name']}` | `{s['test_outcome']}` |")
+        md_lines.append(f"| `{s['module_path']}` | `{s['operator_name']}` | `{s['test_outcome']}` |")
 
-    md_file.write_text("\n".join(lines), encoding="utf-8")
-    logging.info("Markdown summary saved to %s", md_file)
+    md_path = log_dir / "mutation_summary.md"
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
+    logging.info("Markdown summary saved to %s", md_path)
 
 
 def main() -> int:
     """
-    Main entry point: parse arguments, run the mutation workflow, and report metrics.
+    Main entry point: parse args, run mutation workflow, and report metrics.
     """
-    parser = argparse.ArgumentParser(
-        description="Run mutation testing via Cosmic Ray and produce reports."
-    )
-    parser.add_argument(
-        "--config", "-c", type=Path, default=DEFAULT_CONFIG,
-        help="Path to the Cosmic Ray config.toml"
-    )
-    parser.add_argument(
-        "--db", "-d", type=Path, default=DEFAULT_DB,
-        help="Path to the Cosmic Ray SQLite database"
-    )
-    parser.add_argument(
-        "--log-dir", "-l", type=Path, default=DEFAULT_LOG_DIR,
-        help="Directory for JSON and Markdown report outputs"
-    )
-    parser.add_argument(
-        "--min-score", "-m", type=float, default=DEFAULT_MIN_SCORE,
-        help="Minimum kill rate (%) to consider the test suite passing"
-    )
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Run mutation testing via Cosmic Ray and produce reports.")
+    parser.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG,
+                        help="Path to the Cosmic Ray config.toml")
+    parser.add_argument("-d", "--db", type=Path, default=DEFAULT_DB,
+                        help="Path to the Cosmic Ray SQLite database")
+    parser.add_argument("-l", "--log-dir", type=Path, default=DEFAULT_LOG_DIR,
+                        help="Directory for JSON and Markdown outputs")
+    parser.add_argument("-m", "--min-score", type=float, default=DEFAULT_MIN_SCORE,
+                        help="Minimum kill rate (%) to pass")
 
+    args = parser.parse_args()
     setup_logging()
+
     initialize_database(args.config, args.db)
     execute_mutations(args.config, args.db)
 
@@ -284,17 +253,13 @@ def main() -> int:
 
     if survivors:
         save_survivors(survivors, args.log_dir)
-
     save_markdown_summary(killed, total, survivors, args.log_dir)
 
     score = (killed / total) * 100 if total else 0.0
-    logging.info("Mutation score: %.1f%% (%d/%d killed)", score, killed, total)
+    logging.info("Final mutation score: %.1f%% (%d/%d killed)", score, killed, total)
 
     if score < args.min_score:
-        logging.error(
-            "Mutation testing FAILED: minimum %.1f%% required, obtained %.1f%%",
-            args.min_score, score
-        )
+        logging.error("Mutation testing FAILED: required %.1f%%, got %.1f%%", args.min_score, score)
         return 1
 
     logging.info("Mutation testing PASSED (>= %.1f%%)", args.min_score)
