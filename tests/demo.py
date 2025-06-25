@@ -141,39 +141,43 @@ def calculate_metrics(jobs: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[s
     """
     Compute killed count, total mutants, and collect surviving mutants.
 
-    Each job dict has:
-      - "mutations": list of metadata dicts
-      - "results":   list of result dicts (with test_outcome, diff, etc.)
-    We zip ambos para procesar cada mutante correctamente.
+    Each job['mutations'] is actually a flat list of two dicts per mutant:
+    - the first dict: metadata (module_path, operator_name, occurrence…)
+    - the second dict: result (worker_outcome, test_outcome, diff…)
+
+    We iterate en pasos de 2 para procesar cada par.
     """
     total = 0
     killed = 0
     survivors: List[Dict[str, Any]] = []
 
     for job in jobs:
-        metas   = job.get("mutations", [])
-        results = job.get("results", [])
-        # Asegúrate de iterar sólo hasta el menor de ambos
-        for meta, res in zip(metas, results):
+        muts = job.get("mutations", [])
+        # iterate en pares: [meta0, res0, meta1, res1, …]
+        for i in range(0, len(muts), 2):
+            meta = muts[i]
+            result = muts[i+1] if i+1 < len(muts) else {}
             total += 1
-            outcome = res.get("test_outcome")
+
+            outcome = result.get("test_outcome")
             if outcome == "killed":
                 killed += 1
             else:
-                # Sólo guardamos los supervivientes con datos útiles
-                survivors.append({
-                    "module_path":    meta.get("module_path"),
-                    "operator_name":  meta.get("operator_name"),
-                    "occurrence":     meta.get("occurrence"),
-                    "test_outcome":   outcome,
-                    "worker_outcome": res.get("worker_outcome"),
-                    "output":         res.get("output"),
-                    "diff":           res.get("diff"),
-                })
+                # sólo añado a survivors si tengo al menos la metadata
+                if meta.get("module_path") or meta.get("operator_name") is not None:
+                    survivors.append({
+                        "module_path": meta.get("module_path"),
+                        "operator_name": meta.get("operator_name"),
+                        "occurrence": meta.get("occurrence"),
+                        "test_outcome": outcome,
+                        "worker_outcome": result.get("worker_outcome"),
+                        "output": result.get("output"),
+                        "diff": result.get("diff"),
+                    })
 
     logging.info("Metrics computed: %d total, %d killed, %d survived", total, killed, len(survivors))
     return killed, total, survivors
-
+    
 
 def save_survivors(survivors: List[Dict[str, Any]], log_dir: Path) -> None:
     """
