@@ -141,41 +141,44 @@ def calculate_metrics(jobs: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[s
     """
     Compute killed count, total mutants, and collect surviving mutants.
 
-    Args:
-        jobs: List of job dictionaries, each with a "mutations" list.
-
-    Returns:
-        killed: number of mutants killed by tests
-        total: total number of mutants generated
-        survivors: list of surviving mutant dicts (with key details)
+    Cosmic Ray interleaves metadata y resultados en job["mutations"]:
+      [ meta0, res0, meta1, res1, ... ]
+    Por eso iteramos de 2 en 2, emparejando cada meta con su result.
     """
     total = 0
     killed = 0
     survivors: List[Dict[str, Any]] = []
 
     for job in jobs:
-        mutations = job.get("mutations", [])
-        if not isinstance(mutations, list):
-            continue
-        total += len(mutations)
-        for m in mutations:
-            outcome = m.get("test_outcome")
+        muts = job.get("mutations", [])
+        # Si hubiera campo separado "results", úsalo en su lugar:
+        if job.get("results"):
+            metas   = muts
+            results = job["results"]
+        else:
+            # metadatos en posiciones pares, resultados en impares
+            metas   = muts[0::2]
+            results = muts[1::2]
+
+        for meta, result in zip(metas, results):
+            total += 1
+            outcome = result.get("test_outcome")
             if outcome == "killed":
                 killed += 1
             else:
-                # include only if key fields are present
-                if any(m.get(k) for k in ("module_path", "operator_name", "occurrence")):
-                    survivors.append({
-                        "module_path": m.get("module_path"),
-                        "operator_name": m.get("operator_name"),
-                        "occurrence": m.get("occurrence"),
-                        "test_outcome": outcome,
-                        "worker_outcome": m.get("worker_outcome"),
-                        "output": m.get("output"),
-                        "diff": m.get("diff"),
-                    })
+                # guardamos los supervivientes con sus datos reales
+                survivors.append({
+                    "module_path":    meta.get("module_path"),
+                    "operator_name":  meta.get("operator_name"),
+                    "occurrence":     meta.get("occurrence"),
+                    "test_outcome":   outcome,
+                    "worker_outcome": result.get("worker_outcome"),
+                    "output":         result.get("output"),
+                    "diff":           result.get("diff"),
+                })
 
-    logging.info("Metrics computed: %d total, %d killed, %d survived", total, killed, len(survivors))
+    logging.info("Metrics computed: %d total, %d killed, %d survived",
+                 total, killed, len(survivors))
     return killed, total, survivors
 
 
