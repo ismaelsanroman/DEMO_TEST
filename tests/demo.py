@@ -3,7 +3,7 @@
 mutation_check.py
 
 Este script ejecuta pruebas de mutación usando Cosmic Ray y genera, además del JSON de sobrevivientes,
-un reporte .md con el resumen y tabla de mutantes vivos, incluyendo detalles de resultado de ejecución.
+un reporte .md con el resumen y tabla de mutantes vivos.
 """
 
 import sys
@@ -65,13 +65,8 @@ def dump_to_json(db: Path, report: Path) -> None:
         sys.exit(result.returncode)
 
 
-def parse_report(report: Path) -> List[Any]:
-    """
-    Parseamos línea a línea el JSON dump de Cosmic Ray.
-    Cada línea puede ser un dict (job con metadatos + mutations)
-    o bien una lista pura de mutaciones.
-    """
-    jobs: List[Any] = []
+def parse_report(report: Path) -> List[Dict]:
+    jobs: List[Dict] = []
     for line in report.read_text(encoding="utf-8").splitlines():
         text = line.strip().rstrip(",")
         if text in ("", "[", "]"):
@@ -84,19 +79,24 @@ def parse_report(report: Path) -> List[Any]:
 
 
 def calculate_metrics(jobs: List[Any]) -> Tuple[int, int, List[Dict]]:
+    """
+    Recorre cada 'job' (puede ser dict o lista pura de mutaciones),
+    cuenta los 'killed' vs total, y acumula los supervivientes con
+    sus campos test_outcome, worker_outcome, output y diff.
+    """
     total = 0
     killed = 0
     survivors: List[Dict] = []
 
     for job in jobs:
-        # Si es un dict, extraemos mutaciones + campos globales
+        # 1) Si es dict: extraigo mutaciones + metacampos globales
         if isinstance(job, dict):
             mutants = job.get("mutations") or job.get("results") or []
             jw = job.get("worker_outcome")
             jo = job.get("output")
             jt = job.get("test_outcome")
             jd = job.get("diff")
-        # Si es una lista, la asumimos directamente como mutaciones sin metadatos
+        # 2) Si es lista: solo son mutaciones, sin metadatos
         elif isinstance(job, list):
             mutants = job
             jw = jo = jt = jd = None
@@ -105,7 +105,7 @@ def calculate_metrics(jobs: List[Any]) -> Tuple[int, int, List[Dict]]:
 
         total += len(mutants)
         for m in mutants:
-            # Heredamos test_outcome y demás solo si no vienen en la mutación
+            # heredo test_outcome si no viene en la mutación
             outcome = m.get("test_outcome", jt)
             if outcome == "killed":
                 killed += 1
@@ -141,20 +141,12 @@ def save_markdown_report(killed: int, total: int, survivors: List[Dict], log_dir
         f"- **Survived:** {len(survivors)}",
         f"- **Mutation Score:** {score:.1f}%\n"
     ]
-
     if survivors:
         lines.append("## 🧬 Surviving Mutants\n")
-        lines.append("| File | Operator | Test Outcome | Worker Outcome | Output |")
-        lines.append("| ---- | -------- | ------------ | -------------- | ------ |")
+        lines.append("| File | Operator | Outcome |")
+        lines.append("| ---- | -------- | ------- |")
         for m in survivors:
-            short_out = (m.get("output") or "").split("\n", 1)[0]
-            lines.append(
-                f"| `{m['module_path']}`"
-                f" | `{m['operator_name']}`"
-                f" | `{m.get('test_outcome','')}`"
-                f" | `{m.get('worker_outcome','')}`"
-                f" | {short_out} |"
-            )
+            lines.append(f"| {m['module_path']} | {m['operator_name']} | {m.get('test_outcome','')} |")
     else:
         lines.append("✅ **All mutants killed. Great job!**")
 
@@ -164,8 +156,7 @@ def save_markdown_report(killed: int, total: int, survivors: List[Dict], log_dir
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run mutation testing via Cosmic Ray and report survivors.")
+    parser = argparse.ArgumentParser(description="Run mutation testing via Cosmic Ray and report survivors.")
     parser.add_argument("--config", "-c", type=Path, default=DEFAULT_CONFIG,
                         help="Path to the Cosmic Ray config.toml")
     parser.add_argument("--db", "-d", type=Path, default=DEFAULT_DB,
@@ -189,7 +180,7 @@ def main() -> int:
     if survivors:
         save_survivors(survivors, args.log_dir)
 
-    # Guardar siempre el resumen en Markdown
+    # Guardar SIEMPRE el resumen en Markdown
     save_markdown_report(killed, total, survivors, args.log_dir)
 
     score = (killed / total) * 100 if total else 0.0
