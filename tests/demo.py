@@ -2,8 +2,14 @@
 """
 mutation_check.py
 
-Este script ejecuta pruebas de mutación usando Cosmic Ray y genera, además del JSON de sobrevivientes,
-un reporte .md con el resumen y tabla de mutantes vivos.
+Este script orquesta las pruebas de mutación usando Cosmic Ray. Realiza los siguientes pasos:
+1. Inicializa la base de datos de Cosmic Ray si aún no existe.
+2. Ejecuta la sesión de testing de mutaciones.
+3. Vuelca la sesión completa en un fichero JSON.
+4. Parsea el informe JSON para calcular métricas (total, killed, survived).
+5. Guarda la lista de mutantes supervivientes en un JSON aparte.
+6. Genera y guarda un informe Markdown con la puntuación de mutación, 
+   fallando si el porcentaje está por debajo del umbral configurado.
 """
 
 import sys
