@@ -12,11 +12,11 @@ import logging
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 
 # Default configuration constants
 DEFAULT_CONFIG = Path(__file__).parent.parent / "config.toml"
-DEFAULT_DB = Path(__file__).parent.parent / "cr_session.sqlite"
+DEFAULT_DB     = Path(__file__).parent.parent / "cr_session.sqlite"
 DEFAULT_LOG_DIR = Path(__file__).parent.parent / "logs"
 DEFAULT_MIN_SCORE = 80.0
 
@@ -65,8 +65,13 @@ def dump_to_json(db: Path, report: Path) -> None:
         sys.exit(result.returncode)
 
 
-def parse_report(report: Path) -> List[Dict]:
-    jobs: List[Dict] = []
+def parse_report(report: Path) -> List[Any]:
+    """
+    Parseamos línea a línea el JSON dump de Cosmic Ray.
+    Cada línea puede ser un dict (job con metadatos + mutations)
+    o bien una lista pura de mutaciones.
+    """
+    jobs: List[Any] = []
     for line in report.read_text(encoding="utf-8").splitlines():
         text = line.strip().rstrip(",")
         if text in ("", "[", "]"):
@@ -78,22 +83,29 @@ def parse_report(report: Path) -> List[Dict]:
     return jobs
 
 
-def calculate_metrics(jobs: List[Dict]) -> Tuple[int, int, List[Dict]]:
+def calculate_metrics(jobs: List[Any]) -> Tuple[int, int, List[Dict]]:
     total = 0
     killed = 0
     survivors: List[Dict] = []
 
     for job in jobs:
-        # Extraigo mutaciones y posibles campos globales del job
-        mutants = job.get("mutations") or job.get("results") or []
-        jw = job.get("worker_outcome")
-        jo = job.get("output")
-        jt = job.get("test_outcome")
-        jd = job.get("diff")
+        # Si es un dict, extraemos mutaciones + campos globales
+        if isinstance(job, dict):
+            mutants = job.get("mutations") or job.get("results") or []
+            jw = job.get("worker_outcome")
+            jo = job.get("output")
+            jt = job.get("test_outcome")
+            jd = job.get("diff")
+        # Si es una lista, la asumimos directamente como mutaciones sin metadatos
+        elif isinstance(job, list):
+            mutants = job
+            jw = jo = jt = jd = None
+        else:
+            continue
 
         total += len(mutants)
         for m in mutants:
-            # Si la mutación no tiene su propio test_outcome, hereda el del job
+            # Heredamos test_outcome y demás solo si no vienen en la mutación
             outcome = m.get("test_outcome", jt)
             if outcome == "killed":
                 killed += 1
@@ -135,7 +147,6 @@ def save_markdown_report(killed: int, total: int, survivors: List[Dict], log_dir
         lines.append("| File | Operator | Test Outcome | Worker Outcome | Output |")
         lines.append("| ---- | -------- | ------------ | -------------- | ------ |")
         for m in survivors:
-            # Acorto la primera línea de 'output' para no desbordar la tabla
             short_out = (m.get("output") or "").split("\n", 1)[0]
             lines.append(
                 f"| `{m['module_path']}`"
