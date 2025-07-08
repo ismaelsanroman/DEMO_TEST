@@ -2,36 +2,31 @@
 """
 mutation_check.py
 
-Este script orquesta las pruebas de mutación usando Cosmic Ray. Realiza los siguientes pasos:
-1. Inicializa la base de datos de Cosmic Ray si aún no existe.
-2. Ejecuta la sesión de testing de mutaciones.
-3. Vuelca la sesión completa en un fichero JSON.
-4. Parsea el informe JSON para calcular métricas (total, killed, survived).
-5. Guarda la lista de mutantes supervivientes en un JSON aparte.
-6. Genera y guarda un informe Markdown con la puntuación de mutación, 
-   fallando si el porcentaje está por debajo del umbral configurado.
+Orquesta pruebas de mutación con Cosmic Ray y genera:
+  • mutating_testing_report.json  – dump completo (lo hace cosmic-ray).
+  • mutants_survived.json         – mutantes que han sobrevivido ⚠️
+  • mutants_timeout.json          – mutantes que acabaron en timeout/exception ⏰
+  • mutation_summary.md           – informe Markdown con estadísticas.
+Saldrá con exit 1 si la puntuación de mutación < --min-score.
 """
 
-import sys
+import argparse
 import json
 import logging
 import subprocess
-import argparse
+import sys
 from pathlib import Path
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple
 
-# Default configuration constants
-DEFAULT_CONFIG = Path(__file__).parent.parent / "config.toml"
-DEFAULT_DB     = Path(__file__).parent.parent / "cr_session.sqlite"
-DEFAULT_LOG_DIR = Path(__file__).parent.parent / "logs"
+# ---- configuración por defecto -------------------------------------------
+DEFAULT_CONFIG   = Path(__file__).parent.parent / "config.toml"
+DEFAULT_DB       = Path(__file__).parent.parent / "cr_session.sqlite"
+DEFAULT_LOG_DIR  = Path(__file__).parent.parent / "logs"
 DEFAULT_MIN_SCORE = 80.0
 
-
+# ---------------------------------------------------------------------------
 def setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s: %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def run_command(cmd: List[str]) -> None:
@@ -44,6 +39,7 @@ def run_command(cmd: List[str]) -> None:
         sys.exit(result.returncode)
 
 
+# ---------------------------------------------------------------------------
 def initialize_database(config: Path, db: Path) -> None:
     if not db.exists():
         logging.info("Database not found, initializing: %s", db)
@@ -71,89 +67,110 @@ def dump_to_json(db: Path, report: Path) -> None:
         sys.exit(result.returncode)
 
 
+# ---------------------------------------------------------------------------
 def parse_report(report: Path) -> List[Dict]:
+    """Convierte el stream JSON de cosmic-ray en lista de jobs (dict)."""
+    lines = [
+        ln.strip().rstrip(",")
+        for ln in report.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and ln.strip() not in ("[", "]")
+    ]
+    combined = "[" + ",".join(lines) + "]"
+    try:
+        data = json.loads(combined)
+    except json.JSONDecodeError as e:
+        logging.error("Failed to parse JSON report: %s", e)
+        return []
+
     jobs: List[Dict] = []
-    for line in report.read_text(encoding="utf-8").splitlines():
-        text = line.strip().rstrip(",")
-        if text in ("", "[", "]"):
-            continue
-        try:
-            jobs.append(json.loads(text))
-        except json.JSONDecodeError as e:
-            logging.warning("Skipped invalid JSON line: %s", e)
+    for entry in data:
+        jobs.extend(entry if isinstance(entry, list) else [entry])
     return jobs
 
 
-def calculate_metrics(jobs: List[Any]) -> Tuple[int, int, List[Dict]]:
+# ---------------------------------------------------------------------------
+def calculate_metrics(jobs: List[Dict]) -> Tuple[int, int, List[Dict], List[Dict]]:
     """
-    Recorre cada 'job' (puede ser dict o lista pura de mutaciones),
-    cuenta los 'killed' vs total, y acumula los supervivientes con
-    sus campos test_outcome, worker_outcome, output y diff.
+    Devuelve:
+        killed, total, survivors (≠killed), timeouts (timeout/exception)
     """
-    total = 0
-    killed = 0
+    total = killed = 0
     survivors: List[Dict] = []
+    timeouts:  List[Dict] = []
 
     for job in jobs:
-        # 1) Si es dict: extraigo mutaciones + metacampos globales
-        if isinstance(job, dict):
-            mutants = job.get("mutations") or job.get("results") or []
-            jw = job.get("worker_outcome")
-            jo = job.get("output")
-            jt = job.get("test_outcome")
-            jd = job.get("diff")
-        # 2) Si es lista: solo son mutaciones, sin metadatos
-        elif isinstance(job, list):
-            mutants = job
-            jw = jo = jt = jd = None
-        else:
-            continue
+        job_id  = job.get("job_id")
+        mutants = job.get("mutations", [])
 
-        total += len(mutants)
         for m in mutants:
-            # heredo test_outcome si no viene en la mutación
-            outcome = m.get("test_outcome", jt)
+            total += 1
+            outcome = m.get("test_outcome") or job.get("test_outcome")
+
             if outcome == "killed":
                 killed += 1
+                continue  # nada más que hacer
+
+            entry = {
+                "job_id":         job_id,
+                "module_path":    m.get("module_path"),
+                "operator_name":  m.get("operator_name"),
+                "occurrence":     m.get("occurrence"),
+                "test_outcome":   outcome or "timeout",
+                "worker_outcome": m.get("worker_outcome"),
+                "output":         m.get("output") or job.get("output"),
+                "diff":           m.get("diff"),
+            }
+
+            wo  = (entry["worker_outcome"] or "").lower()
+            out = (entry["output"] or "").lower()
+            if entry["test_outcome"] == "timeout" or "timeout" in out or "exception" in wo:
+                timeouts.append(entry)
             else:
-                survivors.append({
-                    "module_path":    m.get("module_path"),
-                    "operator_name":  m.get("operator_name"),
-                    "occurrence":     m.get("occurrence"),
-                    "test_outcome":   outcome,
-                    "worker_outcome": m.get("worker_outcome", jw),
-                    "output":         m.get("output", jo),
-                    "diff":           m.get("diff", jd),
-                })
+                survivors.append(entry)
 
-    return killed, total, survivors
+    return killed, total, survivors, timeouts
 
 
-def save_survivors(survivors: List[Dict], log_dir: Path) -> Path:
-    output_path = log_dir / "mutants_survived.json"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(survivors, indent=2), encoding="utf-8")
-    logging.info("Saved %d surviving mutants to %s", len(survivors), output_path)
-    return output_path
+# ---------------------------------------------------------------------------
+def save_survivors(data: List[Dict], path: Path) -> None:
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    logging.info("Saved %d entries to %s", len(data), path)
 
 
-def save_markdown_report(killed: int, total: int, survivors: List[Dict], log_dir: Path) -> Path:
-    score = (killed / total) * 100 if total else 0.0
+def save_markdown_report(killed: int, total: int,
+                         survivors: List[Dict], timeouts: List[Dict],
+                         log_dir: Path) -> Path:
+    score  = (killed / total) * 100 if total else 0.0
     md_path = log_dir / "mutation_summary.md"
+
     lines = [
         "# Mutation Testing Report\n",
         f"- **Total mutants:** {total}",
         f"- **Killed:** {killed}",
         f"- **Survived:** {len(survivors)}",
-        f"- **Mutation Score:** {score:.1f}%\n"
+        f"- **Timeouts:** {len(timeouts)}",
+        f"- **Mutation Score:** {score:.1f}%\n",
     ]
+
     if survivors:
-        lines.append("## 🧬 Surviving Mutants\n")
-        lines.append("| File | Operator | Outcome |")
-        lines.append("| ---- | -------- | ------- |")
+        lines += [
+            "## ⚠️ Survived Mutants\n",
+            "| Job_ID | File | Operator |",
+            "| ------ | ---- | -------- |",
+        ]
         for m in survivors:
-            lines.append(f"| {m['module_path']} | {m['operator_name']} | {m.get('test_outcome','')} |")
-    else:
+            lines.append(f"| {m['job_id']} | {m['module_path']} | {m['operator_name']} |")
+
+    if timeouts:
+        lines += [
+            "\n## ⏰ Timeout/Exception Mutants\n",
+            "| Job_ID | File | Operator |",
+            "| ------ | ---- | -------- |",
+        ]
+        for m in timeouts:
+            lines.append(f"| {m['job_id']} | {m['module_path']} | {m['operator_name']} |")
+
+    if not survivors and not timeouts:
         lines.append("✅ **All mutants killed. Great job!**")
 
     md_path.write_text("\n".join(lines), encoding="utf-8")
@@ -161,15 +178,16 @@ def save_markdown_report(killed: int, total: int, survivors: List[Dict], log_dir
     return md_path
 
 
+# ---------------------------------------------------------------------------
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run mutation testing via Cosmic Ray and report survivors.")
-    parser.add_argument("--config", "-c", type=Path, default=DEFAULT_CONFIG,
+    parser.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG,
                         help="Path to the Cosmic Ray config.toml")
-    parser.add_argument("--db", "-d", type=Path, default=DEFAULT_DB,
+    parser.add_argument("-d", "--db", type=Path, default=DEFAULT_DB,
                         help="Path to the Cosmic Ray SQLite database")
-    parser.add_argument("--log-dir", "-l", type=Path, default=DEFAULT_LOG_DIR,
+    parser.add_argument("-l", "--log-dir", type=Path, default=DEFAULT_LOG_DIR,
                         help="Directory for JSON report outputs")
-    parser.add_argument("--min-score", "-m", type=float, default=DEFAULT_MIN_SCORE,
+    parser.add_argument("-m", "--min-score", type=float, default=DEFAULT_MIN_SCORE,
                         help="Minimum kill rate (%) to consider the test suite passing")
     args = parser.parse_args()
 
@@ -181,13 +199,15 @@ def main() -> int:
     dump_to_json(args.db, report_file)
 
     jobs = parse_report(report_file)
-    killed, total, survivors = calculate_metrics(jobs)
+    killed, total, survivors, timeouts = calculate_metrics(jobs)
 
+    args.log_dir.mkdir(parents=True, exist_ok=True)
     if survivors:
-        save_survivors(survivors, args.log_dir)
+        save_survivors(survivors, args.log_dir / "mutants_survived.json")
+    if timeouts:
+        save_survivors(timeouts, args.log_dir / "mutants_timeout.json")
 
-    # Guardar SIEMPRE el resumen en Markdown
-    save_markdown_report(killed, total, survivors, args.log_dir)
+    save_markdown_report(killed, total, survivors, timeouts, args.log_dir)
 
     score = (killed / total) * 100 if total else 0.0
     logging.info("Mutation score: %.1f%% (%d/%d killed)", score, killed, total)
