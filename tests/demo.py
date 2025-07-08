@@ -5,10 +5,10 @@
 mutation_check.py
 
 Orquesta pruebas de mutación con Cosmic Ray y genera:
-  • mutating_testing_report.json – dump completo.
-  • mutants_survived.json         – detalles de mutantes que sobrevivieron.
-  • mutation_summary.md           – informe Markdown.
-Sale con código 1 si la puntuación de mutación < --min-score.
+  • mutating_testing_report.json – dump completo (lo hace cosmic-ray).
+  • mutants_survived.json         – mutantes que han sobrevivido ⚠️
+  • mutation_summary.md           – informe Markdown con estadísticas.
+Sale con código 1 si la tasa de mutantes “killed” < --min-score (%).
 """
 
 import argparse
@@ -19,174 +19,162 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-# ------- Configuración por defecto -------
-DEFAULT_CONFIG   = Path(__file__).parent.parent / "config.toml"
-DEFAULT_DB       = Path(__file__).parent.parent / "cr_session.sqlite"
-DEFAULT_LOG_DIR  = Path(__file__).parent.parent / "logs"
-DEFAULT_MIN_SCORE = 80.0  # % mínimo de mutantes “killed”
+# --- Valores por defecto ---
+DEFAULT_CONFIG    = Path(__file__).parent.parent / "config.toml"
+DEFAULT_DB        = Path(__file__).parent.parent / "cr_session.sqlite"
+DEFAULT_LOG_DIR   = Path(__file__).parent.parent / "logs"
+DEFAULT_MIN_SCORE = 80.0  # %
 
-# -----------------------------------------
-
+# -----------------------------
 def setup_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 def run_command(cmd: List[str]) -> None:
-    logging.info("Ejecutando: %s", " ".join(cmd))
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.stdout:
-        logging.info(res.stdout.strip())
-    if res.returncode != 0:
-        logging.error("Error (exit %d): %s", res.returncode, res.stderr.strip())
-        sys.exit(res.returncode)
+    logging.info("▶ Ejecutando: %s", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.stdout:
+        logging.info(proc.stdout.strip())
+    if proc.returncode != 0:
+        logging.error("❌ Error (%d) en comando: %s", proc.returncode, proc.stderr.strip())
+        sys.exit(proc.returncode)
 
-def initialize_database(config: Path, db: Path) -> None:
+def initialize_db(config: Path, db: Path) -> None:
     if not db.exists():
-        logging.info("Inicializando base de datos: %s", db)
+        logging.info("🔧 Inicializando BBDD: %s", db)
         run_command(["cosmic-ray", "init", str(config), str(db), "--force"])
     else:
-        logging.info("Base de datos ya existe, continúa.")
+        logging.info("ℹ️  BBDD ya existe, se omite init.")
 
 def execute_mutations(config: Path, db: Path) -> None:
     run_command(["cosmic-ray", "exec", str(config), str(db)])
 
 def dump_to_json(db: Path, out: Path) -> None:
-    out.parent.mkdir(exist_ok=True, parents=True)
-    logging.info("Volcando informe JSON: %s", out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    logging.info("💾 Volcando reporte JSON completo: %s", out)
     with out.open("w", encoding="utf-8") as f:
-        res = subprocess.run(["cosmic-ray", "dump", str(db)],
-                             stdout=f, stderr=subprocess.PIPE, text=True)
-    if res.returncode != 0:
-        logging.error("Error al volcar JSON: %s", res.stderr.strip())
-        sys.exit(res.returncode)
+        proc = subprocess.run(["cosmic-ray", "dump", str(db)], stdout=f, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        logging.error("❌ Falló dump: %s", proc.stderr.strip())
+        sys.exit(proc.returncode)
 
-def parse_report(report: Path) -> List[Dict[str, Any]]:
+def parse_report(path: Path) -> List[Dict[str, Any]]:
     """
-    Convierte el dump JSON de Cosmic Ray en una lista de jobs.
-    Cada línea es un JSON (o lista de mutaciones), las unimos en una lista grande.
+    Convierte el stream JSON de cosmic-ray en una lista hueca de mutantes.
+    Maneja líneas sueltas o listas dentro de cada entry.
     """
-    lines = []
-    for ln in report.read_text(encoding="utf-8").splitlines():
-        txt = ln.strip().rstrip(",")
-        if txt and txt not in ("[", "]"):
-            lines.append(txt)
-    blob = "[" + ",".join(lines) + "]"
+    raw = path.read_text(encoding="utf-8").splitlines()
+    lines = [l.strip().rstrip(",") for l in raw if l.strip() and l.strip() not in ("[", "]")]
+    combined = "[" + ",".join(lines) + "]"
     try:
-        data = json.loads(blob)
+        data = json.loads(combined)
     except json.JSONDecodeError as e:
-        logging.error("No pude parsear el JSON: %s", e)
+        logging.error("❌ Error parseando JSON: %s", e)
         sys.exit(1)
 
-    # Normalizar: cada entry puede ser dict o lista de dicts
+    # Aplanamos: cada elemento puede ser un dict (job) o lista (mutaciones)
     jobs: List[Dict[str, Any]] = []
     for entry in data:
-        if isinstance(entry, list):
-            jobs.extend(entry)
-        else:
+        if isinstance(entry, dict):
             jobs.append(entry)
+        elif isinstance(entry, list):
+            # cada mutación de la lista la metemos como “job” individual
+            for mut in entry:
+                jobs.append(mut)
     return jobs
 
 def calculate_metrics(jobs: List[Dict[str, Any]]) -> Tuple[int, int, List[Dict[str, Any]]]:
     """
-    Cuenta total y killed, y recoge supervivientes.
-    Devuelve: (killed, total, survivors)
+    Recorre jobs, cuenta total vs killed y acumula los supervivientes con:
+    job_id, module_path, operator_name, output y test_outcome.
     """
     total = 0
     killed = 0
     survivors: List[Dict[str, Any]] = []
 
     for job in jobs:
-        job_id = job.get("job_id")
-        mutations = job.get("mutations", [])
-        # Para cada mutante:
-        for m in mutations:
+        # extraemos campos
+        job_id  = job.get("job_id")
+        # Si el entry es un job con lista de mutaciones:
+        mutants = job.get("mutations") or [job] if "job_id" not in job else [job]
+        # En cada mutante:
+        for m in mutants:
             total += 1
-            # test_outcome puede venir en la mutación o en el job
-            outcome = m.get("test_outcome") or job.get("test_outcome") or ""
+            outcome = m.get("test_outcome") or job.get("test_outcome")
             if outcome == "killed":
                 killed += 1
             else:
                 survivors.append({
-                    "job_id":        job_id,
-                    "module_path":   m.get("module_path"),
-                    "operator_name": m.get("operator_name"),
-                    "test_outcome":  outcome,
-                    "output":        m.get("output") or job.get("output", ""),
+                    "job_id"        : job_id,
+                    "module_path"   : m.get("module_path"),
+                    "operator_name" : m.get("operator_name"),
+                    "output"        : m.get("output") or job.get("output"),
+                    "test_outcome"  : outcome or "unknown",
                 })
 
     return killed, total, survivors
 
-def save_json(data: List[Dict[str, Any]], path: Path) -> None:
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    logging.info("Guardado JSON (%d ítems): %s", len(data), path)
+def save_survivors(survivors: List[Dict[str, Any]], out_json: Path) -> None:
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(survivors, indent=2, ensure_ascii=False), encoding="utf-8")
+    logging.info("⚠️  Guardados %d mutantes supervivientes en %s", len(survivors), out_json)
 
-def save_markdown(killed: int, total: int,
-                  survivors: List[Dict[str, Any]], log_dir: Path) -> Path:
+def save_markdown_report(killed: int, total: int, survivors: List[Dict[str, Any]],
+                         out_md: Path, min_score: float) -> None:
     score = (killed / total * 100) if total else 0.0
-    md = log_dir / "mutation_summary.md"
-    lines: List[str] = [
-        "# 🧪 Informe de Mutation Testing\n",
-        f"- **Total de mutantes:** {total}",
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# 🧪 Mutation Testing Report\n",
+        f"- **Total mutantes:** {total}",
         f"- **Killed:** {killed}",
-        f"- **Sobrevivieron:** {len(survivors)}",
-        f"- **Mutation Score:** {score:.1f}%\n",
+        f"- **Supervivientes:** {len(survivors)}",
+        f"- **Mutation Score:** {score:.1f}% (mínimo requerido: {min_score:.1f}%)\n",
     ]
     if survivors:
         lines += [
-            "## ⚠️ Mutantes supervivientes\n",
-            "| Job ID | File | Operador | Resultado del test | Output |",
-            "| ------ | ---- | -------- | ------------------ | ------ |",
+            "## ⚠️ Mutantes Supervivientes\n",
+            "| Job ID | Módulo | Operador | Resultado |",
+            "| ------ | ------ | -------- | --------- |",
         ]
         for m in survivors:
-            lines.append(
-                f"| {m['job_id']} | {m['module_path']} | {m['operator_name']} "
-                f"| {m['test_outcome']} | {m['output'].replace('|','\\|')} |"
-            )
+            lines.append(f"| {m['job_id']} | {m['module_path']} | {m['operator_name']} | {m['test_outcome']} |")
     else:
-        lines.append("✅ **Todos los mutantes fueron muertos. ¡Genial!**")
+        lines.append("✅ **¡Todos los mutantes fueron killed! Buen trabajo.**")
 
-    md.parent.mkdir(exist_ok=True, parents=True)
-    md.write_text("\n".join(lines), encoding="utf-8")
-    logging.info("Guardado reporte Markdown: %s", md)
-    return md
+    out_md.write_text("\n".join(lines), encoding="utf-8")
+    logging.info("📝 Informe Markdown guardado en %s", out_md)
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Ejecuta Cosmic Ray, evalúa métricas y genera informe."
-    )
-    parser.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG,
-                        help="Ruta a config.toml de Cosmic Ray")
-    parser.add_argument("-d", "--db",     type=Path, default=DEFAULT_DB,
-                        help="Ruta a la base SQLite de Cosmic Ray")
-    parser.add_argument("-l", "--log-dir", type=Path, default=DEFAULT_LOG_DIR,
-                        help="Directorio para salidas JSON y MD")
-    parser.add_argument("-m", "--min-score", type=float, default=DEFAULT_MIN_SCORE,
-                        help="%% mínimo de mutantes muertos para pasar")
+    parser = argparse.ArgumentParser(description="Run mutation testing via Cosmic Ray and report survivors.")
+    parser.add_argument("-c", "--config",   type=Path, default=DEFAULT_CONFIG,   help="Ruta a config.toml")
+    parser.add_argument("-d", "--db",       type=Path, default=DEFAULT_DB,       help="Ruta a cr_session.sqlite")
+    parser.add_argument("-l", "--log-dir",  type=Path, default=DEFAULT_LOG_DIR,  help="Directorio para outputs")
+    parser.add_argument("-m", "--min-score",type=float, default=DEFAULT_MIN_SCORE,help="Kill rate mínimo (%)")
     args = parser.parse_args()
 
     setup_logging()
-    initialize_database(args.config, args.db)
+    initialize_db(args.config, args.db)
     execute_mutations(args.config, args.db)
 
     report_json = args.log_dir / "mutating_testing_report.json"
     dump_to_json(args.db, report_json)
 
-    jobs = parse_report(report_json)
+    jobs      = parse_report(report_json)
     killed, total, survivors = calculate_metrics(jobs)
 
-    # Guardar JSON y Markdown
-    args.log_dir.mkdir(exist_ok=True, parents=True)
-    if survivors:
-        save_json(survivors, args.log_dir / "mutants_survived.json")
-    save_markdown(killed, total, survivors, args.log_dir)
+    # Guardamos JSON y Markdown
+    save_survivors(survivors, args.log_dir / "mutants_survived.json")
+    save_markdown_report(killed, total, survivors,
+                         args.log_dir / "mutation_summary.md", args.min_score)
 
-    # Mostrar resultado y salir con código adecuado
-    score = (killed / total * 100) if total else 0.0
-    logging.info("Mutation score: %.1f%% (%d/%d killed)", score, killed, total)
-    if score < args.min_score:
-        logging.error("❌ FALLÓ: mínimo %.1f%%, obtenido %.1f%%", args.min_score, score)
+    logging.info("📊 Mutation score: %.1f%% (%d/%d killed)", (killed/total*100 if total else 0), killed, total)
+
+    # Si no llega al umbral, salimos con error
+    if total and (killed / total * 100) < args.min_score:
+        logging.error("🚨 Mutation testing FAILED: mínimo %.1f%%, obtenido %.1f%%",
+                      args.min_score, killed / total * 100)
         return 1
 
-    logging.info("✅ PASÓ (>= %.1f%%)", args.min_score)
+    logging.info("✅ Mutation testing PASSED (>= %.1f%%)", args.min_score)
     return 0
 
 if __name__ == "__main__":
